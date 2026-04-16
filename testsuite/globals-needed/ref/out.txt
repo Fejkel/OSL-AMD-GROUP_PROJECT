@@ -1,0 +1,2 @@
+Need 1 globals:  backfacing
+Need 2 globals:  P flipHandedness

@@ -1,0 +1,4 @@
+{
+    global: *OSL*; *osl*imageio*; *osl_input_extensions; PyInit*;
+    local: osl_*; *pvt*; *;
+};

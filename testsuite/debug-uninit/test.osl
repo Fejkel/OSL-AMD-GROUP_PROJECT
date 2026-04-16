@@ -1,0 +1,61 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader
+test (output color Cout = 0)
+{
+    int i_init = 0;
+    int i_uninit;
+    float f_init = 0.5;
+    float f_uninit;
+    string s_init = "";
+    string s_uninit;
+    Cout = color (f_uninit, (float)i_uninit, 0);
+    Cout *= texture (s_uninit, u, v);
+
+    float x = 0;
+    {
+        float A[3];         // uninitialized
+        A[1] = 1;           // initialize one element
+        x += A[1];          // NOT an error
+        x += A[2];          // An error
+    }
+    {
+        color C;            // uninitialized
+        C[1] = 1;           // initialize one element
+        x += C[1];          // NOT an error
+        x += C[2];          // An error
+    }
+    {
+        matrix M;           // uninitialized
+        M[1][2] = 1;        // initialize one element
+        x += M[1][2];       // NOT an error
+        x += M[0][0];       // An error
+    }
+    float knots[20];
+    float knots2[20];
+    float knots3[20];
+    float knots4[20];
+    int index=0;
+    // Ensure no false positive for temporary condition variable
+    while (index < 10) {
+        knots[index] = x*index;
+        knots2[index] = (1.0-x)*index;
+        knots3[index] = 2*x*index;
+        knots4[index] = 2*(1.0-x)*index;
+        ++index;
+    }
+    // Ensure no false positive for accessing initialized portion of a partially initialized array
+    x += spline ("linear", x, 10, knots);
+    x += splineinverse ("linear", x, 10, knots2);
+
+    // Accessing uninitialized portion of a partially initialized array
+    x += spline ("linear", x, 15, knots3);
+    x += splineinverse ("linear", x, 15, knots4);
+
+    // pointcloud_get could also have false postive and read partially initialized array
+    // leaving pointcloud_get out, as not all builds are configured for pointcloud support    
+
+    Cout[0] += x;  // force x results to not be optimized away
+}

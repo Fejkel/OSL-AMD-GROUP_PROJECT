@@ -1,0 +1,23 @@
+<World>
+   <Camera eye="0, 250, 400" look_at="0,0,0" fov="40" />
+
+   <ShaderGroup>
+      shader uv layer1;
+   </ShaderGroup>
+   <Sphere center="-60,30,60"        radius="30" />
+   <ShaderGroup>
+      float sigma 0.3;
+      color Cs 0.2 0.7 0.2;
+      shader matte layer1;
+   </ShaderGroup>
+   <Sphere center="  0,30,60"        radius="30" />
+   <ShaderGroup>
+      string filename "../common/textures/grid.tx";
+      shader tex_matte layer1;
+   </ShaderGroup>
+   <Sphere center=" 60,30,60"        radius="30" />
+
+   <ShaderGroup is_light="yes">float power 200000; shader emitter layer1;</ShaderGroup>
+   <Quad corner="-120, 130, 250" edge_x="1,0,0" edge_y="0,1,0" /> <!--Lite -->
+   
+</World>
