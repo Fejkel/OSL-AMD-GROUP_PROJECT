@@ -59,10 +59,10 @@ extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 OSL_NAMESPACE_BEGIN
 
 // NEW
-static OSL::GPUTargetDesc make_amdgpu_target() {
+static OSL::GPUTargetDesc make_amdgpu_target(const std::string& arch) {
     return OSL::GPUTargetDesc(OSL::GPUBackendKind::AMDGPU, 
                               "amdgcn-amd-amdhsa", 
-                              {"gfx1100"}, 
+                              {arch}, 
                               "llvm_bitcode");
 }
 
@@ -1172,10 +1172,14 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
 
     // NEW
     if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
-        m_gpu_target = make_amdgpu_target();
+        std::string hip_arch = "gfx1100";
+        OSL::RendererServices::TextureHandle* th = nullptr; // dummy
+        renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch);        
+        m_gpu_target = make_amdgpu_target(hip_arch);
     } 
     else if (m_use_optix) {
         m_gpu_target = make_nvptx_target();
+    }
 
 
     m_shading_state_uniform.m_commonspace_synonym     = Strings::world;

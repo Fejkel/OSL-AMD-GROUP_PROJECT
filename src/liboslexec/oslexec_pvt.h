@@ -66,7 +66,35 @@ namespace Strutil = OIIO::Strutil;
 
 OSL_NAMESPACE_BEGIN
 
+// NEW
+enum class GPUBackendKind {
+    None = 0,
+    NVPTX = 1,   // NEW for CUDA/OptiX
+    AMDGPU = 2   // NEW for HIP/ROCm
+};
 
+struct GPUTargetDesc {
+    GPUBackendKind backend = GPUBackendKind::None;
+    std::string triple;
+    std::vector<std::string> archs;
+    std::string artifact_format;
+
+    GPUTargetDesc() = default;
+    GPUTargetDesc(GPUBackendKind b, const std::string& t, const std::vector<std::string>& a, const std::string& f)
+        : backend(b), triple(t), archs(a), artifact_format(f) {}
+};
+
+struct CompiledGPUArtifact {
+    std::vector<uint8_t> payload;
+    std::string architecture;
+    std::string format;
+    int llvm_version;
+
+    CompiledGPUArtifact() : llvm_version(0) {}
+    CompiledGPUArtifact(const std::vector<uint8_t>& p, const std::string& arch, const std::string& fmt, int llvm_ver)
+        : payload(p), architecture(arch), format(fmt), llvm_version(llvm_ver) {}
+};
+// END NEW
 
 struct PerThreadInfo {
     PerThreadInfo();
@@ -984,9 +1012,6 @@ private:
     int m_optix_no_inline_thresh;  ///< Disable inlining for functions larger than the threshold
     int m_optix_force_inline_thresh;  ///< Force inling for functions smaller than the threshold
 
-    int m_max_optix_groupdata_alloc;    //NEW
-    bool m_use_optix;                   //NEW
-    bool m_use_optix_cache;             //NEW
 
     ustring m_colorspace;  ///< What RGB colors mean
 

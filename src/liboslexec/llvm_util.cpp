@@ -147,33 +147,6 @@ toArrayRef(const T (&Arr)[N])
     return llvm::ArrayRef<T>(Arr);
 }
 
-enum class GPUBackendKind {
-    None = 0,
-    NVPTX = 1,   // NEW for CUDA/OptiX
-    AMDGPU = 2   // NEW for HIP/ROCm
-};
-
-struct GPUTargetDesc {
-    GPUBackendKind backend = GPUBackendKind::None;
-    std::string triple;                
-    std::vector<std::string> archs;    
-    std::string artifact_format;     
-
-    GPUTargetDesc() = default;
-    GPUTargetDesc(GPUBackendKind b, const std::string& t, const std::vector<std::string>& a, const std::string& f)
-        : backend(b), triple(t), archs(a), artifact_format(f) {}
-};
-
-struct CompiledGPUArtifact {
-    std::vector<uint8_t> payload;
-    std::string architecture;  
-    std::string format;           
-    int llvm_version;          
-
-    CompiledGPUArtifact() : llvm_version(0) {}
-    CompiledGPUArtifact(const std::vector<uint8_t>& p, const std::string& arch, const std::string& fmt, int llvm_ver)
-        : payload(p), architecture(arch), format(fmt), llvm_version(llvm_ver) {}
-};
 
 namespace pvt {
 
@@ -1886,6 +1859,62 @@ LLVM_Util::nvptx_target_machine()
                    && "Unable to create TargetMachine for NVPTX");
     }
     return m_nvptx_target_machine;
+}
+
+// NEW
+llvm::TargetMachine*
+LLVM_Util::amdgpu_target_machine(const std::string& gpu_arch)
+{
+    if (m_amdgpu_target_machine == nullptr) {
+        llvm::Triple ModuleTriple(module()->getTargetTriple()); 
+        llvm::TargetOptions options;
+        
+        options.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+#if OSL_LLVM_VERSION < 220
+        options.UnsafeFPMath = 1;
+#endif
+        options.NoInfsFPMath = 1;
+        options.NoNaNsFPMath = 1;
+        options.HonorSignDependentRoundingFPMathOption = 0;
+        options.FloatABIType = llvm::FloatABI::Default;
+        options.AllowFPOpFusion = llvm::FPOpFusion::Fast;
+        options.NoZerosInBSS = 0;
+        options.GuaranteedTailCallOpt = 0;
+        options.UseInitArray = 0;
+
+        std::string error;
+#if OSL_LLVM_VERSION >= 220
+        const llvm::Target* llvm_target
+            = llvm::TargetRegistry::lookupTarget(ModuleTriple, error);
+#else
+        const llvm::Target* llvm_target
+            = llvm::TargetRegistry::lookupTarget(ModuleTriple.str(), error);
+#endif
+        OSL_ASSERT(llvm_target
+                   && "AMDGPU compile error: LLVM Target is not initialized");
+
+        m_amdgpu_target_machine = llvm_target->createTargetMachine(
+#if OSL_LLVM_VERSION >= 210
+            llvm::Triple(ModuleTriple.str()),
+#else
+            ModuleTriple.str(),
+#endif
+            gpu_arch,
+            "",
+            options, 
+            llvm::Reloc::PIC_,
+            llvm::CodeModel::Small,
+#if OSL_LLVM_VERSION >= 180
+            llvm::CodeGenOptLevel::Default
+#else
+            llvm::CodeGenOpt::Default
+#endif
+        );
+
+        OSL_ASSERT(m_amdgpu_target_machine
+                   && "Unable to create TargetMachine for AMDGPU");
+    }
+    return m_amdgpu_target_machine;
 }
 
 
@@ -6485,6 +6514,34 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 #endif
 }
 
+// NEW
+bool
+LLVM_Util::amdgpu_compile_group(llvm::Module*, const std::string& name,
+                                std::string& out, const std::string& gpu_arch)
+{
+
+    llvm::TargetMachine* target_machine = amdgpu_target_machine(gpu_arch);
+    llvm::legacy::PassManager mpm;
+    
+    llvm::SmallString<4096> binary_buffer;
+    llvm::raw_svector_ostream binary_stream(binary_buffer);
+
+#if OSL_LLVM_VERSION >= 180
+    target_machine->addPassesToEmitFile(mpm, binary_stream,
+                                        nullptr,
+                                        llvm::CodeGenFileType::ObjectFile);
+#else
+    target_machine->addPassesToEmitFile(mpm, binary_stream,
+                                        nullptr,
+                                        llvm::CGFT_ObjectFile);
+#endif
+
+    mpm.run(*module());
+
+    out = binary_buffer.str().str();
+
+    return true;
+}
 
 
 std::string
