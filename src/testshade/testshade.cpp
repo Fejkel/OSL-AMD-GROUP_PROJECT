@@ -129,6 +129,10 @@ static char* output_base_ptr   = nullptr;
 static bool use_rs_bitcode
     = false;  // use free function bitcode version of renderer services
 static int jbufferMB = 16;
+// NEW - Ka
+// AMDGPU support: storage for CLI arguments
+static std::string amdgpu_arch;  // Target architecture (e.g., "gfx1100")
+static bool save_amdgpu = false; // Flag to trigger bitcode export to disk
 
 // Testshade thread tracking and assignment.
 // Not recommended for production renderer but fine for testshade
@@ -860,6 +864,12 @@ getargs(int argc, const char* argv[])
       .help("Use free function bitcode Renderer services");
     ap.arg("--jbufferMB %d:JBUFFER",  &jbufferMB)
       .help("journal jbuffer size in MB");
+    //NEW - Ka
+    // AMDGPU backend options: allow specifying the GPU target and saving the artifact
+      ap.arg("--device %s", &amdgpu_arch)
+      .help("Target AMD GPU architecture (e.g. gfx1100)");
+    ap.arg("--save-amdgpu", &save_amdgpu)
+      .help("Save the generated AMDGPU bitcode to a file");
 
     // clang-format on
     ap.parse_args(argc, argv);
@@ -1983,6 +1993,14 @@ test_shade(int argc, const char* argv[])
     // TextureSystem (note: passing nullptr just makes the ShadingSystem
     // make its own TS), and an error handler.
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
+    //NEW - Ka
+    // Configure AMDGPU target architecture if requested via CLI.
+    if (!amdgpu_arch.empty()) {
+        shadingsys->attribute("amdgpu_architecture", amdgpu_arch);
+        if (verbose)
+        std::cout << "Setting OSL attribute: amdgpu_target = " << amdgpu_arch << "\n";
+    }
+
     rend->init_shadingsys(shadingsys);
 
     // Register the layout of all closures known to this renderer
@@ -2268,6 +2286,45 @@ test_shade(int argc, const char* argv[])
     // Need to call journal::initialize_buffer before re-using the jbuffer
 
     double runtime = timer.lap();
+
+    // NEW - KA
+    // AMDGPU Artifact Export: 
+    // If bitcode generation was successful and requested by the user, 
+    // retrieve the binary blob from the shading system and write it to a file.
+    if (save_amdgpu && !amdgpu_arch.empty()) {
+    int num_artifacts = 0;
+    // Sprawdzamy ile plików (artefaktów) wygenerował backend
+    if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
+        for (int i = 0; i < num_artifacts; ++i) {
+            const void* data_ptr = nullptr;
+            ustring arch, format;
+
+            // Używamy formatu "gpu_artifact:INDEX:PROP"
+            std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
+            std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
+            std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
+
+            if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
+                shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
+                shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
+
+                // Tworzymy nazwę pliku: shader_gfx1100.bc lub shader_gfx1100.o
+                std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
+                std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
+
+                std::ofstream outfile(out_filename, std::ios::binary);
+                if (outfile.is_open()) {
+                    // Tu musisz poprosićo atrybut "size", 
+                    // tymczasowo hardkodujemy testowo
+                    std::cout << "SUCCESS: Found AMDGPU artifact for " << arch << " in format " << format << "\n";
+                    // outfile.write((const char*)data_ptr, artifact_size); 
+                }
+            }
+        }
+    } else {
+        std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
+    }
+}
 
     // This awkward condition preserves an output oddity from long ago,
     // eliminating the need to update hundreds of ref outputs.
