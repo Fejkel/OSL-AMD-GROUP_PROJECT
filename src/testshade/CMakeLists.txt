@@ -5,7 +5,8 @@
 # The 'testshade' executable
 set ( testshade_srcs
       testshade.cpp
-      simplerend.cpp )
+      simplerend.cpp
+      ../testrender/hip_raytracer.cpp) # New - NA
 
 if (OSL_BUILD_BATCHED)
     list(APPEND testshade_srcs

@@ -24,6 +24,7 @@
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/sysutil.h>
 #include <OpenImageIO/timer.h>
+#include "../testrender/hip_raytracer.h" // New - Na
 
 #include <OSL/encodedtypes.h>
 #include <OSL/journal.h>
@@ -2287,45 +2288,64 @@ test_shade(int argc, const char* argv[])
 
     double runtime = timer.lap();
 
-    // NEW - KA
-    // AMDGPU Artifact Export: 
-    // If bitcode generation was successful and requested by the user, 
-    // retrieve the binary blob from the shading system and write it to a file.
-    if (save_amdgpu && !amdgpu_arch.empty()) {
-    int num_artifacts = 0;
-    // Sprawdzamy ile plików (artefaktów) wygenerował backend
-    if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
-        for (int i = 0; i < num_artifacts; ++i) {
-            const void* data_ptr = nullptr;
-            ustring arch, format;
+    // NEW - NATAN (Integracja Architektury AMDGPU)
+    // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
+    if (!amdgpu_arch.empty()) {
+        
+        // 1. Inicjalizacja Twojego polimorficznego renderera
+        std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
+        gpu_renderer->init();
 
-            // Używamy formatu "gpu_artifact:INDEX:PROP"
-            std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
-            std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
-            std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
+        int num_artifacts = 0;
+        if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
+            for (int i = 0; i < num_artifacts; ++i) {
+                const void* data_ptr = nullptr;
+                size_t artifact_size = 0; 
+                ustring arch, format;
 
-            if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
-                shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
-                shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
+                std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
+                std::string attr_size = OIIO::Strutil::format("gpu_artifact:%d:size", i); 
+                std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
+                std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
 
-                // Tworzymy nazwę pliku: shader_gfx1100.bc lub shader_gfx1100.o
-                std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
-                std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
+                if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
+                    shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::UINT64, &artifact_size) &&
+                    shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
+                    shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
 
-                std::ofstream outfile(out_filename, std::ios::binary);
-                if (outfile.is_open()) {
-                    // Tu musisz poprosićo atrybut "size", 
-                    // tymczasowo hardkodujemy testowo
-                    std::cout << "SUCCESS: Found AMDGPU artifact for " << arch << " in format " << format << "\n";
-                    // outfile.write((const char*)data_ptr, artifact_size); 
+                    // 2. Pakowanie danych do Twojej uniwersalnej struktury
+                    GPUShaderModuleDesc desc;
+                    desc.architecture = arch.string();
+                    desc.format = format.string();
+                    desc.data_ptr = data_ptr;
+                    desc.data_size = artifact_size;
+
+                    // 3. Ładowanie bajtów do sztucznego środowiska HIP
+                    gpu_renderer->load_shader(desc);
+
+                    // 4. (Opcjonalnie) Zapis na dysk, jeśli podano flagę --save-amdgpu
+                    if (save_amdgpu) {
+                        std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
+                        std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
+                        std::ofstream outfile(out_filename, std::ios::binary);
+                        if (outfile.is_open()) {
+                            outfile.write((const char*)data_ptr, artifact_size);
+                            std::cout << "[Testshade] Zapisano artefakt na dysk: " << out_filename << "\n";
+                        }
+                    }
                 }
             }
+        } else {
+            std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
         }
-    } else {
-        std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
-    }
-}
 
+        // 5. Finałowy "render" w HIP
+        gpu_renderer->render(xres, yres); 
+    }
+
+    // This awkward condition preserves an output oddity from long ago,
+    // eliminating the need to update hundreds of ref outputs.
+    if (outputfiles.size() == 1 && outputfiles[0] == "null")
     // This awkward condition preserves an output oddity from long ago,
     // eliminating the need to update hundreds of ref outputs.
     if (outputfiles.size() == 1 && outputfiles[0] == "null")
