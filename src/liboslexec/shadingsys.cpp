@@ -59,17 +59,17 @@ extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 OSL_NAMESPACE_BEGIN
 
 // NEW
-static OSL::GPUTargetDesc make_amdgpu_target(const std::string& arch) {
+static OSL::GPUTargetDesc make_amdgpu_target(const std::vector<std::string>& archs) {
     return OSL::GPUTargetDesc(OSL::GPUBackendKind::AMDGPU, 
                               "amdgcn-amd-amdhsa", 
-                              {arch}, 
+                              archs, 
                               "llvm_bitcode");
 }
 
 static OSL::GPUTargetDesc make_nvptx_target() {
     return OSL::GPUTargetDesc(OSL::GPUBackendKind::NVPTX, 
                               "nvptx64-nvidia-cuda", 
-                              {"sm_50"}, 
+                              std::vector<std::string>{"sm_50"},
                               "ptx");
 }
 
@@ -1170,21 +1170,35 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_stat_max_llvm_local_mem(0)
 {
 
-    // NEW - do testow zmien pozniej
-    // if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
-    //     std::string hip_arch = "gfx1100";
-    //     OSL::RendererServices::TextureHandle* th = nullptr; // dummy
-    //     renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch);        
-    //     m_gpu_target = make_amdgpu_target(hip_arch);
-    // } 
-    if (true) { // Wymuszamy wejście tutaj dla testu
-        std::string hip_arch = "gfx1100"; 
-        m_gpu_target = make_amdgpu_target(hip_arch);
-        std::cout << "DEBUG: FORCING AMDGCN TARGET!" << std::endl; // Dodaj to, żebyś widział w konsoli
+    // NEW - KB 
+if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
+    std::string hip_arch_str = "gfx1100";
+    renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch_str);
+
+    // 3. Rozbijamy string (np. "gfx1030,gfx1100") na listę architektur
+    std::vector<std::string> archs;
+    std::stringstream ss(hip_arch_str);
+    std::string item;
+    
+    while (std::getline(ss, item, ',')) {
+        // Usuwamy ewentualne białe znaki, żeby uniknąć błędów
+        item.erase(std::remove_if(item.begin(), item.end(), ::isspace), item.end());
+        if (!item.empty()) {
+            archs.push_back(item);
+        }
     }
-    else if (m_use_optix) {
-        m_gpu_target = make_nvptx_target();
+    
+    // Zabezpieczenie: jeśli string był pusty, wrzucamy domyślną
+    if (archs.empty()) {
+        archs.push_back("gfx1100");
     }
+
+    // 4. Przekazujemy gotową listę do Twojej nowej funkcji!
+    m_gpu_target = make_amdgpu_target(archs);
+}
+else if (m_use_optix) {
+    m_gpu_target = make_nvptx_target();
+}
 
 
     m_shading_state_uniform.m_commonspace_synonym     = Strings::world;
@@ -2136,7 +2150,11 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
             int index = 0;
             char prop[32] = {0};
             
-            if (sscanf(name.c_str(), "gpu_artifact:%d:%31s", &index, prop) == 2) {
+            // NEW - KB NA CHWILE
+                std::string name_str(name);
+                if (sscanf(name_str.c_str(), "gpu_artifact:%d:%31s", &index, prop) == 2) {
+
+            // if (sscanf(name.c_str(), "gpu_artifact:%d:%31s", &index, prop) == 2) {
                 if (index >= 0 && index < (int)group->m_compiled_gpu_artifacts.size()) {
                     const auto& artifact = group->m_compiled_gpu_artifacts[index];
                     string_view prop_str(prop);
@@ -2146,6 +2164,17 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
                             *(const void**)val = artifact.payload.data();
                         return true;
                     }
+                    // NEW - KB
+                    else if (prop_str == "size") {
+                        if (type == TypeDesc::INT) {
+                            if (val) *(int*)val = (int)artifact.payload.size();
+                            return true;
+                        } else if (type == TypeDesc::INT64) {
+                            if (val) *(int64_t*)val = (int64_t)artifact.payload.size();
+                            return true;
+                        }
+                    } // END NEW
+
                     else if (prop_str == "architecture" && type == TypeDesc::STRING) {
                         if (val)
                             *(ustring*)val = ustring(artifact.architecture);
@@ -3901,6 +3930,31 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                                    group.m_llvm_groupdata_size);
             }
         }
+        // NEW - KB
+        // (Założyłem, że stworzycie metodę use_amdgpu_cache() lub sprawdzicie m_gpu_target)
+
+        // !!! ZAKOMENTOWANE NA CZAS MILESTONE 1 (Czeka na Kacpra w Milestone 2)
+        
+        /* else if (use_amdgpu_cache()) { 
+            
+            // Pobieramy bazowy hash dla grupy (może trzeba dopisać amdgpu_cache_key() w klasie ShaderGroup)
+            std::string cache_key = group.amdgpu_cache_key(); 
+
+            // KROK 3: TUTAJ DOKLEJAMY ARCHITEKTURY DO KLUCZA CACHE!
+            // (m_amdgpu_arch_string to zmienna z Kroku 2, w której trzymasz string np. "gfx1030,gfx1100")
+            cache_key += "_HIP_ARCH_" + m_amdgpu_arch_string; 
+
+            std::string cache_value;
+            // Szukamy w cache (Natan i Kacper pewnie będą woleli klucz "amdgpu_bc" zamiast "optix_ptx")
+            if (renderer()->cache_get("amdgpu_bc", cache_key, cache_value)) {
+                cached = true;
+                
+                // Odpakowanie kodu z pamięci podręcznej (analogiczne do optix_cache_unwrap)
+                amdgpu_cache_unwrap(cache_value,
+                                    group.m_llvm_amdgpu_compiled_version,
+                                    group.m_llvm_groupdata_size);
+            }
+        }*/
 
         if (!cached) {
             BackendLLVM lljitter(*this, group, ctx);
