@@ -1170,13 +1170,18 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_stat_max_llvm_local_mem(0)
 {
 
-    // NEW
-    if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
-        std::string hip_arch = "gfx1100";
-        OSL::RendererServices::TextureHandle* th = nullptr; // dummy
-        renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch);        
+    // NEW - do testow zmien pozniej
+    // if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
+    //     std::string hip_arch = "gfx1100";
+    //     OSL::RendererServices::TextureHandle* th = nullptr; // dummy
+    //     renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch);        
+    //     m_gpu_target = make_amdgpu_target(hip_arch);
+    // } 
+    if (true) { // Wymuszamy wejście tutaj dla testu
+        std::string hip_arch = "gfx1100"; 
         m_gpu_target = make_amdgpu_target(hip_arch);
-    } 
+        std::cout << "DEBUG: FORCING AMDGCN TARGET!" << std::endl; // Dodaj to, żebyś widział w konsoli
+    }
     else if (m_use_optix) {
         m_gpu_target = make_nvptx_target();
     }

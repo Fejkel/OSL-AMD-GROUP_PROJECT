@@ -8,7 +8,8 @@ set (testrender_srcs
      simpleraytracer.cpp
      scene.cpp
      bvh.cpp
-     testrender.cpp)
+     testrender.cpp
+     hip_raytracer.cpp) # New - Na
 
 find_package(Threads REQUIRED)
 
