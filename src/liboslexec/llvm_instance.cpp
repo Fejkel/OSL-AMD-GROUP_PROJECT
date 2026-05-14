@@ -2512,8 +2512,7 @@ BackendLLVM::run()
         } else {
             // 2. Pakujemy gotowe bajty w nasz nowy Artefakt i dodajemy do wektora Kacpra
             group().m_compiled_gpu_artifacts.push_back(
-                CompiledGPUArtifact(bitcode, OSL_AMDGPU_TARGET_ARCH, "llvm_bitcode", OSL_LLVM_VERSION)
-            );
+            CompiledGPUArtifact(bitcode, shadingsys().amdgpu_architecture().string(), "llvm_bitcode", OSL_LLVM_VERSION)            );
         }
     } else
 #endif

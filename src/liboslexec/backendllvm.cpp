@@ -12,6 +12,13 @@
 // NEW - KB (ZAMIAST OLKA) : Nagłówki LLVM potrzebne do zapisu bitkodu dla AMDGPU ---
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Support/raw_ostream.h>
+
+#include <fstream>
+
+#include <map>
+#include <string>
+// Globalny cache testowy (Tylko do testow z testshade!)
+std::map<std::string, std::string> g_amdgpu_temp_cache;
 // NED NEW
 
 using namespace OSL;
@@ -935,12 +942,40 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
     llvm::SmallVector<char, 4096> bitcode_buffer;
     
     // 2. Tworzymy strumień, który zapisze dane prosto do naszego bufora
-    llvm::raw_svector_ostream dest(bitcode_buffer);
-    
+    llvm::raw_svector_ostream dest(bitcode_buffer);  
+
     // 3. Magia LLVM: zrzucamy cały aktualny moduł do postaci binarnej (Bitcode)
     // Zmienna 'll' zarządza stanem LLVM, wyciągamy z niej gotowy moduł.
     llvm::WriteBitcodeToFile(*ll.module(), dest);
     
+    if (shadingsys().use_amdgpu_cache()) {
+        
+        // Generujemy klucz (taki sam jak przy odczycie)
+        std::string cache_key = group().amdgpu_cache_key() 
+                              + "_AMDGPU_" 
+                              + shadingsys().m_amdgpu_architecture.string();
+                              
+        // OSL wymaga std::string_view / std::string dla cache_put, więc konwertujemy:
+        std::string cache_value(bitcode_buffer.begin(), bitcode_buffer.end());
+        
+        // Wrzucamy dane do "sejfu" renderera
+        // !!!!! shadingsys().renderer()->cache_put("amdgpu_bc", cache_key, cache_value);
+        // DODAJ ZAMIAST TEGO:
+        // g_amdgpu_temp_cache[cache_key] = cache_value;
+
+        std::string filename = "/tmp/" + cache_key + ".bin";
+        std::ofstream out_file(filename, std::ios::binary);
+        if (out_file.is_open()) {
+            out_file.write(cache_value.data(), cache_value.size());
+            out_file.close();
+            // info(...) // tutaj Twój log o zapisie
+            shadingsys().info(OIIO::Strutil::format("Zapisano AMDGPU Cache "));
+        }
+
+        // Opcjonalny log, żebyś widziała w terminalu, że zapis zadziałał
+        
+    }
+
     // 4. Kopiujemy gotowe bajty do standardowego std::vector<uint8_t>
     return std::vector<uint8_t>(bitcode_buffer.begin(), bitcode_buffer.end());
 }

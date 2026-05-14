@@ -29,6 +29,16 @@
 
 #include "opcolor.h"
 
+// NEW - KB
+
+#include <map>
+#include <string>
+
+// Odniesienie do mapy z backendllvm.cpp
+extern std::map<std::string, std::string> g_amdgpu_temp_cache;
+
+// END NEW
+
 using namespace OSL;
 using namespace OSL::pvt;
 
@@ -3956,13 +3966,22 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
 
             std::string cache_value;
             // 2. Szukamy w systemowym cache OSL pod kluczem "amdgpu_bc"
-            if (renderer()->cache_get("amdgpu_bc", cache_key, cache_value)) {
-                cached = true;
+            // !!!!! if (renderer()->cache_get("amdgpu_bc", cache_key, cache_value)) {
+            std::string filename = "/tmp/" + cache_key + ".bin";
+            std::ifstream in_file(filename, std::ios::binary);
+
+            if (in_file.good()) {
+                // Wczytujemy cały plik do stringa
+                std::stringstream buffer;
+                buffer << in_file.rdbuf();
+                cache_value = buffer.str();
                 
-                // 3. Jeśli znaleziono, "odpakowujemy" binaria prosto do grupy
+                cached = true;
                 amdgpu_cache_unwrap(cache_value, group);
                 
-                info(OIIO::Strutil::format("Zastosowano AMDGPU Cache dla grupy %s", group.name()));            }
+                // Użyj .c_str() żeby %s zadziałało:
+                info(OIIO::Strutil::format("Zastosowano AMDGPU Cache z dysku dla grupy %s", group.name().c_str()));
+            }
         }
 
         if (!cached) {
