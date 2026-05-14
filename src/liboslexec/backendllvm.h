@@ -44,7 +44,8 @@ public:
     /// Set additional Module/Function options for the CUDA/OptiX target.
     void prepare_module_for_cuda_jit();
 
-
+// NEW - KB (ZAMIAST OLKA)  wyciąganie binarnego bitkodu LLVM dla AMDGPU
+    std::vector<uint8_t> get_llvm_bitcode();
 
     /// What LLVM debug level are we at?
     int llvm_debug() const;

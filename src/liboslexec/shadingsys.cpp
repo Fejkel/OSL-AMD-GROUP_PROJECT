@@ -1623,7 +1623,19 @@ osl_simd_caps()
     // clang-format on
 }
 
-
+// NEW - KB
+void 
+ShadingSystemImpl::amdgpu_cache_unwrap(const std::string& cache_value, ShaderGroup& group)
+{
+    // Zamieniamy string z cache na wektor bajtów
+    std::vector<uint8_t> data(cache_value.begin(), cache_value.end());
+    
+    // Pakujemy to z powrotem do wektora artefaktów, który stworzyliśmy wcześniej
+    group.m_compiled_gpu_artifacts.push_back(
+        CompiledGPUArtifact(data, m_amdgpu_architecture.string(), "llvm_bitcode", OSL_LLVM_VERSION)
+    );
+}
+// END NEW
 
 bool
 ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
@@ -1650,6 +1662,11 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     }
 
     lock_guard guard(m_mutex);  // Thread safety
+    // NEW - KB 
+    ATTR_SET("amdgpu", int, m_use_amdgpu);
+    ATTR_SET("amdgpu_cache", int, m_use_amdgpu_cache);
+    ATTR_SET_STRING("amdgpu_architecture", m_amdgpu_architecture);
+    // END NEW
     ATTR_SET("statistics:level", int, m_statslevel);
     ATTR_SET("debug", int, m_debug);
     ATTR_SET("lazylayers", int, m_lazylayers);
@@ -3931,30 +3948,22 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             }
         }
         // NEW - KB
-        // (Założyłem, że stworzycie metodę use_amdgpu_cache() lub sprawdzicie m_gpu_target)
-
-        // !!! ZAKOMENTOWANE NA CZAS MILESTONE 1 (Czeka na Kacpra w Milestone 2)
-        
-        /* else if (use_amdgpu_cache()) { 
-            
-            // Pobieramy bazowy hash dla grupy (może trzeba dopisać amdgpu_cache_key() w klasie ShaderGroup)
-            std::string cache_key = group.amdgpu_cache_key(); 
-
-            // KROK 3: TUTAJ DOKLEJAMY ARCHITEKTURY DO KLUCZA CACHE!
-            // (m_amdgpu_arch_string to zmienna z Kroku 2, w której trzymasz string np. "gfx1030,gfx1100")
-            cache_key += "_HIP_ARCH_" + m_amdgpu_arch_string; 
+        else if (use_amdgpu_cache()) { 
+            // 1. Pobieramy unikalny klucz dla tej grupy shaderów
+            std::string cache_key = group.amdgpu_cache_key() 
+                                  + "_AMDGPU_" 
+                                  + m_amdgpu_architecture.string();
 
             std::string cache_value;
-            // Szukamy w cache (Natan i Kacper pewnie będą woleli klucz "amdgpu_bc" zamiast "optix_ptx")
+            // 2. Szukamy w systemowym cache OSL pod kluczem "amdgpu_bc"
             if (renderer()->cache_get("amdgpu_bc", cache_key, cache_value)) {
                 cached = true;
                 
-                // Odpakowanie kodu z pamięci podręcznej (analogiczne do optix_cache_unwrap)
-                amdgpu_cache_unwrap(cache_value,
-                                    group.m_llvm_amdgpu_compiled_version,
-                                    group.m_llvm_groupdata_size);
-            }
-        }*/
+                // 3. Jeśli znaleziono, "odpakowujemy" binaria prosto do grupy
+                amdgpu_cache_unwrap(cache_value, group);
+                
+                info(OIIO::Strutil::format("Zastosowano AMDGPU Cache dla grupy %s", group.name()));            }
+        }
 
         if (!cached) {
             BackendLLVM lljitter(*this, group, ctx);

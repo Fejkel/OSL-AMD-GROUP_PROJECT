@@ -9,6 +9,11 @@
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
+// NEW - KB (ZAMIAST OLKA) : Nagłówki LLVM potrzebne do zapisu bitkodu dla AMDGPU ---
+#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/Support/raw_ostream.h>
+// NED NEW
+
 using namespace OSL;
 using namespace OSL::pvt;
 
@@ -924,7 +929,21 @@ BackendLLVM::find_userdata_index(const Symbol& sym)
     return userdata_index;
 }
 
-
+// NEW - KB (ZAMIAST OLKA) - wyciąganie binarnego bitkodu LLVM dla AMDGPU
+std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
+    // 1. Tworzymy bufor (SmallVector jest zoptymalizowany przez LLVM pod szybki zapis)
+    llvm::SmallVector<char, 4096> bitcode_buffer;
+    
+    // 2. Tworzymy strumień, który zapisze dane prosto do naszego bufora
+    llvm::raw_svector_ostream dest(bitcode_buffer);
+    
+    // 3. Magia LLVM: zrzucamy cały aktualny moduł do postaci binarnej (Bitcode)
+    // Zmienna 'll' zarządza stanem LLVM, wyciągamy z niej gotowy moduł.
+    llvm::WriteBitcodeToFile(*ll.module(), dest);
+    
+    // 4. Kopiujemy gotowe bajty do standardowego std::vector<uint8_t>
+    return std::vector<uint8_t>(bitcode_buffer.begin(), bitcode_buffer.end());
+}
 
 };  // namespace pvt
 OSL_NAMESPACE_END

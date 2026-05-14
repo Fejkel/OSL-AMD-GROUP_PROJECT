@@ -149,6 +149,12 @@ file (GLOB exec_headers "*.h")
 file (GLOB compiler_headers "../liboslcomp/*.h")
 
 FLEX_BISON ( osolex.l osogram.y oso lib_src exec_headers )
+# NEW - KB
+set(OSL_AMDGPU_TARGET_ARCH "" CACHE STRING "Target AMD GPU architecture (e.g. gfx900, gfx1030)")
+if(OSL_AMDGPU_TARGET_ARCH)
+    message(STATUS "====> AMDGPU CROSS-COMPILATION: Forced target architecture -> ${OSL_AMDGPU_TARGET_ARCH}")
+    add_definitions(-DOSL_AMDGPU_TARGET_ARCH="${OSL_AMDGPU_TARGET_ARCH}")
+endif()
 
 set ( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS" )
 # NEW - Ka

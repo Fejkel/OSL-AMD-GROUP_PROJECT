@@ -667,6 +667,13 @@ public:
 
     bool use_optix() const { return m_use_optix; }
     bool use_optix_cache() const { return m_use_optix_cache; }
+
+    // NEW - KB 
+    bool use_amdgpu() const { return m_use_amdgpu; }
+    bool use_amdgpu_cache() const { return m_use_amdgpu_cache; }
+    ustring amdgpu_architecture() const { return m_amdgpu_architecture; }
+    // END NEW
+
     bool debug_nan() const { return m_debugnan; }
     bool debug_uninit() const { return m_debug_uninit; }
     bool lockgeom_default() const { return m_lockgeom_default; }
@@ -993,6 +1000,12 @@ private:
     int m_compile_report;    ///< Print compilation report?
     bool m_use_optix;        ///< This is an OptiX-based renderer
     bool m_use_optix_cache;  ///< Renderer-enabled caching for OptiX ptx
+    // NEW - KB 
+    bool m_use_amdgpu = false;
+    bool m_use_amdgpu_cache = true;
+    ustring m_amdgpu_architecture;
+    void amdgpu_cache_unwrap(const std::string& cache_value, ShaderGroup& group);
+    // END NEW
     int m_max_optix_groupdata_alloc;  ///< Maximum OptiX groupdata buffer allocation
     bool m_buffer_printf;             ///< Buffer/batch printf output?
     bool m_no_noise;                  ///< Substitute trivial noise calls
@@ -1885,6 +1898,13 @@ public:
     // Generate and memoize the cache key so we don't calculate it twice
     void generate_optix_cache_key(string_view code);
     std::string optix_cache_key() const { return m_optix_cache_key; }
+
+    // NEW - KB
+    std::string amdgpu_cache_key() const {
+        return m_name.string();   
+    }
+    // END NEW
+
 
     std::string serialize() const;
 

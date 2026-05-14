@@ -2500,6 +2500,24 @@ BackendLLVM::run()
         }
     } else
 #endif
+// NEW - KB (ZAMIAST OLEK)
+#if OSL_ENABLE_AMDGPU
+    if (shadingsys().use_amdgpu()) {
+        // 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
+        // (Wywołujemy bez 'll.'!)
+        std::vector<uint8_t> bitcode = get_llvm_bitcode();
+        
+        if (bitcode.empty()) {
+            OSL_ASSERT(0 && "Unable to generate AMDGPU Bitcode");
+        } else {
+            // 2. Pakujemy gotowe bajty w nasz nowy Artefakt i dodajemy do wektora Kacpra
+            group().m_compiled_gpu_artifacts.push_back(
+                CompiledGPUArtifact(bitcode, OSL_AMDGPU_TARGET_ARCH, "llvm_bitcode", OSL_LLVM_VERSION)
+            );
+        }
+    } else
+#endif
+// END NEW
     {
         // Force the JIT to happen now and retrieve the JITed function pointers
         // for the initialization and all public entry points.
