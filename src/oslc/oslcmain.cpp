@@ -117,9 +117,9 @@ main(int argc, const char* argv[])
     std::string shader_path;
 
     // NEW
-    bool use_amdgpu = false;
-    bool use_hip_runtime = false;
-    std::string amd_device = "";
+    [[maybe_unused]] bool use_amdgpu = false;
+    [[maybe_unused]] bool use_hip_runtime = false;
+    [[maybe_unused]] std::string amd_device = "";
 
     // Parse arguments from command line
     for (int a = 1; a < argc; ++a) {

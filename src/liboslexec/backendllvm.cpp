@@ -3,15 +3,31 @@
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 
+// NEW - KB (ZAMIAST OLKA) : Nagłówki LLVM potrzebne do zapisu bitkodu dla AMDGPU ---
+#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/Support/raw_ostream.h>
+#include <fstream>
+#include <map>
+#include <string>
+#include <optional>
+
+// Nagłówki Targetu i Emisji Kodu dla LLVM 18
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/CodeGen.h>
+
+// WŁAŚCIWY NAGŁÓWEK DLA RE REJESTRACJI STAREGO PASS MANAGERA W LLVM 18:
+#include <llvm/IR/LegacyPassManager.h>
+
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/strutil.h>
 
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
-// NEW - KB (ZAMIAST OLKA) : Nagłówki LLVM potrzebne do zapisu bitkodu dla AMDGPU ---
-#include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvm/Support/raw_ostream.h>
+
 
 #include <fstream>
 
@@ -938,47 +954,76 @@ BackendLLVM::find_userdata_index(const Symbol& sym)
 
 // NEW - KB (ZAMIAST OLKA) - wyciąganie binarnego bitkodu LLVM dla AMDGPU
 std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
-    // 1. Tworzymy bufor (SmallVector jest zoptymalizowany przez LLVM pod szybki zapis)
-    llvm::SmallVector<char, 4096> bitcode_buffer;
-    
-    // 2. Tworzymy strumień, który zapisze dane prosto do naszego bufora
-    llvm::raw_svector_ostream dest(bitcode_buffer);  
+    // 1. Inicjalizacja komponentów LLVM dla architektury AMDGPU.
+    LLVMInitializeAMDGPUTargetInfo();
+    LLVMInitializeAMDGPUTarget();
+    LLVMInitializeAMDGPUTargetMC();
+    LLVMInitializeAMDGPUAsmPrinter();
 
-    // 3. Magia LLVM: zrzucamy cały aktualny moduł do postaci binarnej (Bitcode)
-    // Zmienna 'll' zarządza stanem LLVM, wyciągamy z niej gotowy moduł.
-    llvm::WriteBitcodeToFile(*ll.module(), dest);
-    
-    if (shadingsys().use_amdgpu_cache()) {
-        
-        // Generujemy klucz (taki sam jak przy odczycie)
-        std::string cache_key = group().amdgpu_cache_key() 
-                              + "_AMDGPU_" 
-                              + shadingsys().m_amdgpu_architecture.string();
-                              
-        // OSL wymaga std::string_view / std::string dla cache_put, więc konwertujemy:
-        std::string cache_value(bitcode_buffer.begin(), bitcode_buffer.end());
-        
-        // Wrzucamy dane do "sejfu" renderera
-        // !!!!! shadingsys().renderer()->cache_put("amdgpu_bc", cache_key, cache_value);
-        // DODAJ ZAMIAST TEGO:
-        // g_amdgpu_temp_cache[cache_key] = cache_value;
-
-        std::string filename = "/tmp/" + cache_key + ".bin";
-        std::ofstream out_file(filename, std::ios::binary);
-        if (out_file.is_open()) {
-            out_file.write(cache_value.data(), cache_value.size());
-            out_file.close();
-            // info(...) // tutaj Twój log o zapisie
-            shadingsys().info(OIIO::Strutil::format("Zapisano AMDGPU Cache "));
-        }
-
-        // Opcjonalny log, żebyś widziała w terminalu, że zapis zadziałał
-        
+    // 2. Pobranie docelowej architektury (np. gfx1030, gfx1100)
+    std::string arch_str = shadingsys().amdgpu_architecture().string();
+    if (arch_str.empty()) {
+        arch_str = "gfx1100"; // Bezpieczny fallback
     }
 
-    // 4. Kopiujemy gotowe bajty do standardowego std::vector<uint8_t>
-    return std::vector<uint8_t>(bitcode_buffer.begin(), bitcode_buffer.end());
-}
+    // 3. Wyszukanie oficjalnego potoku (Targetu) AMD w LLVM
+    std::string llvm_error;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget("amdgcn-amd-amdhsa", llvm_error);
+    if (!target) {
+        shadingsys().error(OIIO::Strutil::format("LLVM Error: Nie znaleziono targetu AMDGPU (%s)", llvm_error.c_str()));
+        return std::vector<uint8_t>();
+    }
 
-};  // namespace pvt
+    // 4. Konfiguracja maszyny docelowej (TargetMachine)
+    llvm::TargetOptions options;
+    
+    // POPRAWKA 1: Używamy standardowego std::optional zamiast usuniętego llvm::Optional
+    std::optional<llvm::Reloc::Model> relocation_model = llvm::Reloc::PIC_;
+    
+    std::unique_ptr<llvm::TargetMachine> target_machine(
+        target->createTargetMachine("amdgcn-amd-amdhsa", arch_str, "", options, relocation_model)
+    );
+
+    if (!target_machine) {
+        shadingsys().error("LLVM Error: Nie udalo sie stworzyc TargetMachine dla AMDGPU");
+        return std::vector<uint8_t>();
+    }
+
+    // Dostosowanie układu danych i potrójnego identyfikatora modułu LLVM pod AMD
+    ll.module()->setDataLayout(target_machine->createDataLayout());
+    ll.module()->setTargetTriple("amdgcn-amd-amdhsa");
+
+    // 5. Przygotowanie bufora w pamięci RAM na wynikowy binarny obiekt ELF
+    llvm::SmallVector<char, 4096> elf_buffer;
+    llvm::raw_svector_ostream dest(elf_buffer);
+
+    // 6. UROCHOMIENIE POTOKU EMISJI KODU MASZYNOWEGO
+    // POPRAWKA 2: Wykorzystujemy dedykowany dla etapu CodeGen legacy::PassManager
+    llvm::legacy::PassManager code_gen_pm;
+
+    // Ponieważ LLVM 18 wymaga CodeGenFileType::ObjectFile, przekazujemy strumień dest
+    if (target_machine->addPassesToEmitFile(code_gen_pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+        shadingsys().error("LLVM Error: Backend kompilatora LLVM 18 nie wspiera bezpośredniej emisji ELF dla AMDGPU");
+        return std::vector<uint8_t>();
+    }
+
+    // Uruchamiamy proces translacji modułu IR do binarnego formatu maszynowego
+    code_gen_pm.run(*ll.module());
+
+    // 7. Disk Cache (Logika Kingi) - zapisujemy binarny ELF do folderu /tmp/
+    std::string cache_key = group().amdgpu_cache_key() + "_AMDGPU_" + arch_str;
+    std::string cache_value(elf_buffer.begin(), elf_buffer.end());
+    
+    std::string filename = "/tmp/" + cache_key + ".bin";
+    std::ofstream out_file(filename, std::ios::binary);
+    if (out_file.is_open()) {
+        out_file.write(cache_value.data(), cache_value.size());
+        out_file.close();
+        shadingsys().info(OIIO::Strutil::format("Zapisano gotowy AMDGPU ELF do pamięci podręcznej dysku"));
+    }
+
+    // Zwracamy wektor bajtów zawierający czysty, skompilowany plik ELF
+    return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
+}}; 
+// namespace pvt
 OSL_NAMESPACE_END
