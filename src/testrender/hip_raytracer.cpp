@@ -47,16 +47,30 @@ bool HipRaytracer::init() {
 }
 
 // -------------------------------------------------------------------------
-// 2. Ładowanie skompilowanego modułu OSL (pliku binarnego ELF dla AMD)
+// Destruktor (Zwalnianie pamięci z karty graficznej) - Na
+// -------------------------------------------------------------------------
+HipRaytracer::~HipRaytracer() {
+    if (m_module) {
+        hipModuleUnload(m_module);
+        std::cout << "[HIP] Zwalnianie pamięci: Usunięto moduł z pamięci VRAM.\n";
+    }
+}
+
+// -------------------------------------------------------------------------
+// 2. Ładowanie skompilowanego modułu OSL (pliku binarnego ELF dla AMD) - Na
 // -------------------------------------------------------------------------
 bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
     std::cout << "[HIP] Wywołano load_shader()...\n";
+
+    if (!desc.data_ptr || desc.data_size == 0) {
+        std::cerr << "BŁĄD: Otrzymano pusty wskaźnik na bajty shadera!\n";
+        return false;
+    }
+
+    // Wgrywamy bajty z pamięci RAM (od LLVM) wprost do pamięci karty graficznej AMD!
+    HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
     
-    // Tutaj w kolejnym etapie dodamy kod, który bierze bajty z desc
-    // i ładuje je na kartę graficzną za pomocą:
-    // hipModule_t module;
-    // HIP_CHECK(hipModuleLoadData(&module, desc.skompilowany_kod_z_osl));
-    
+    std::cout << "[HIP] Sukces: Wgrano moduł shadera na kartę graficzną AMD!\n";
     return true;
 }
 
@@ -72,3 +86,4 @@ void HipRaytracer::render(int width, int height) {
     // 2. Odpalimy kernel funkcji głównej (hipLaunchKernelGGL / hipModuleLaunchKernel)
     // 3. Skopiujemy wyrenderowany obraz z powrotem do RAMu (hipMemcpy)
 }
+
