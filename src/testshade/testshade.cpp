@@ -2290,9 +2290,10 @@ test_shade(int argc, const char* argv[])
 
     // NEW - NATAN (Integracja Architektury AMDGPU)
     // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
+    // NEW - NATAN (Integracja Architektury AMDGPU)
+    // NEW - NATAN (Integracja Architektury AMDGPU)
     if (!amdgpu_arch.empty()) {
         
-        // 1. Inicjalizacja Twojego polimorficznego renderera
         std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
         gpu_renderer->init();
 
@@ -2300,46 +2301,51 @@ test_shade(int argc, const char* argv[])
         if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
             for (int i = 0; i < num_artifacts; ++i) {
                 const void* data_ptr = nullptr;
-                size_t artifact_size = 0; 
-                ustring arch, format;
+                size_t artifact_size = 0;
+                int artifact_size_int = 0;
 
-                std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
-                std::string attr_size = OIIO::Strutil::format("gpu_artifact:%d:size", i); 
-                std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
-                std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
+                // POPRAWKA: Bezpieczne klejenie stringów (omijamy błąd z %d)
+                std::string attr_data = "gpu_artifact:" + std::to_string(i) + ":data";
+                std::string attr_size = "gpu_artifact:" + std::to_string(i) + ":size";
 
-                if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::UINT64, &artifact_size) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
+                // Wyciąganie wskaźnika na dane
+                bool has_data = shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr);
+                
+                // Wyciąganie rozmiaru (próbujemy typów INT i INT64 dla 100% pewności)
+                bool has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT, &artifact_size_int);
+                if (has_size) {
+                    artifact_size = artifact_size_int;
+                } else {
+                    int64_t sz64 = 0;
+                    has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT64, &sz64);
+                    artifact_size = sz64;
+                }
 
-                    // 2. Pakowanie danych do Twojej uniwersalnej struktury
+                if (has_data && has_size) {
                     GPUShaderModuleDesc desc;
-                    desc.architecture = arch.string();
-                    desc.format = format.string();
+                    desc.architecture = amdgpu_arch;
+                    desc.format = "hsaco";
                     desc.data_ptr = data_ptr;
                     desc.data_size = artifact_size;
 
-                    // 3. Ładowanie bajtów do sztucznego środowiska HIP
                     gpu_renderer->load_shader(desc);
 
-                    // 4. (Opcjonalnie) Zapis na dysk, jeśli podano flagę --save-amdgpu
                     if (save_amdgpu) {
-                        std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
-                        std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
+                        std::string out_filename = "shader_" + amdgpu_arch + ".hsaco";
                         std::ofstream outfile(out_filename, std::ios::binary);
                         if (outfile.is_open()) {
                             outfile.write((const char*)data_ptr, artifact_size);
-                            std::cout << "[Testshade] Zapisano artefakt na dysk: " << out_filename << "\n";
+                            std::cout << "[Testshade] Zapisano natywny artefakt na dysk: " << out_filename << "\n";
                         }
                     }
+                } else {
+                    std::cerr << "[Testshade] Błąd wyciągania atrybutów dla artefaktu " << i << "\n";
                 }
             }
         } else {
             std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
         }
 
-        // 5. Finałowy "render" w HIP
         gpu_renderer->render(xres, yres); 
     }
 
