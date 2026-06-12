@@ -1,6 +1,9 @@
 // New - Ka
 #include "hip_raytracer.h"
 #include <iostream>
+#include <vector>
+#include <fstream>
+#include <cstdlib>
 #include <hip/hip_runtime.h>
 
 // Makro do wygodnego sprawdzania, czy funkcje HIP nie zwracają błędów
@@ -14,6 +17,17 @@
     } \
 }
 
+// NOWE makro dla funkcji zwracających void (render)
+#define HIP_CHECK_VOID(command) \
+{ \
+    hipError_t status = command; \
+    if (status != hipSuccess) { \
+        std::cerr << "HIP Error: " << hipGetErrorString(status) \
+                  << " w linii " << __LINE__ << " w pliku " << __FILE__ << std::endl; \
+        return; \
+    } \
+}
+
 // -------------------------------------------------------------------------
 // 1. Inicjalizacja środowiska i karty graficznej
 // -------------------------------------------------------------------------
@@ -24,11 +38,12 @@ bool HipRaytracer::init() {
     if (hipGetDeviceCount(&deviceCount) != hipSuccess || deviceCount == 0) {
         std::cerr << "BŁĄD: Nie znaleziono żadnych urządzeń obsługujących HIP!" << std::endl;
         return false;
+        // TU JEST TRUE A MA BYC FALSE; TYLKO W CELACH TESTOW NA LAPTOPIE OLKA
     }
 
     std::cout << "Znaleziono " << deviceCount << " urządzenie/a HIP.\n";
 
-    for (int i = 0; i < deviceCount; ++i) {
+    /*for (int i = 0; i < deviceCount; ++i) {
         hipDeviceProp_t deviceProp;
         HIP_CHECK(hipGetDeviceProperties(&deviceProp, i));
         
@@ -36,7 +51,7 @@ bool HipRaytracer::init() {
         std::cout << "  Architektura (GCN/RDNA): " << deviceProp.gcnArchName << "\n";
         std::cout << "  Całkowita pamięć VRAM: " << deviceProp.totalGlobalMem / (1024 * 1024) << " MB\n";
         std::cout << "  Max wątków na blok: " << deviceProp.maxThreadsPerBlock << "\n";
-    }
+    }*/
     
     // Wybieramy domyślną kartę (indeks 0)
     HIP_CHECK(hipSetDevice(0));
@@ -67,12 +82,23 @@ bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
         return false;
     }
 
-    // Wgrywamy bajty z pamięci RAM (od LLVM) wprost do pamięci karty graficznej AMD!
-    HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
+    std::string hsaco_filename = "/tmp/osl_temp_shader.hsaco";
     
-    std::cout << "[HIP] Sukces: Wgrano moduł shadera na kartę graficzną AMD!\n";
+    // Zrzucamy gotowy plik od LLVM lub z cache prosto na dysk (dla dowodu działania)
+    std::ofstream hsaco_file(hsaco_filename, std::ios::binary);
+    hsaco_file.write(static_cast<const char*>(desc.data_ptr), desc.data_size);
+    hsaco_file.close();
+    
+    std::cout << "[HIP] Sukces (Dry Run): Kod binarny zapisano bezpiecznie na dysk (" << hsaco_filename << ").\n";
+
+  
+    HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
+    HIP_CHECK(hipModuleGetFunction(&m_kernel, m_module, "osl_exec_unnamed_group_1"));
+
     return true;
 }
+
+
 
 // -------------------------------------------------------------------------
 // 3. Uruchomienie kernela renderującego na GPU
@@ -81,9 +107,47 @@ void HipRaytracer::render(int width, int height) {
     std::cout << "[HIP] Rozpoczęcie renderowania. Rozdzielczość: " 
               << width << "x" << height << "\n";
               
-    // Tutaj w przyszłości:
-    // 1. Zaalokujemy bufory obrazu (hipMalloc)
-    // 2. Odpalimy kernel funkcji głównej (hipLaunchKernelGGL / hipModuleLaunchKernel)
-    // 3. Skopiujemy wyrenderowany obraz z powrotem do RAMu (hipMemcpy)
+              
+              
+    // 1. Alokacja pamięci VRAM na GPU dla bufora obrazu wyjściowego (RGBA, 4x float)
+    size_t buffer_size = width * height * 4 * sizeof(float);
+    hipDeviceptr_t d_output;
+    HIP_CHECK_VOID(hipMalloc((void**)&d_output, buffer_size));
+
+    // 2. Skonfigurowanie bloków i siatki (Grid) wątków
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width + blockSize.x - 1) / blockSize.x,
+                  (height + blockSize.y - 1) / blockSize.y);
+
+    // 3. Przygotowanie argumentów do przekazania do kernela
+    // WAŻNE: Struktura args musi ściśle odpowiadać sygnaturze funkcji w wygenerowanym pliku .bc!
+    // Poniższe działa, jeśli kernel to: void my_kernel(float* d_output, int width, int height)
+    void* args[] = { &d_output, &width, &height };
+
+    // 4. Uruchomienie kernela na fizycznej karcie RDNA
+    HIP_CHECK_VOID(hipModuleLaunchKernel(
+        m_kernel,
+        gridSize.x, gridSize.y, gridSize.z,
+        blockSize.x, blockSize.y, blockSize.z,
+        0, 0, // Pamięć współdzielona i strumień domyślny
+        args, nullptr
+    ));
+
+    // 5. Czekamy aż karta skończy renderować
+    HIP_CHECK_VOID(hipDeviceSynchronize());
+    std::cout << "[HIP] Kernel zakończył pracę.\n";
+
+    // 6. Skopiowanie wyniku z VRAM (GPU) z powrotem do RAM (Host)
+    std::vector<float> h_output(width * height * 4);
+    HIP_CHECK_VOID(hipMemcpy(h_output.data(), (void*)d_output, buffer_size, hipMemcpyDeviceToHost));
+
+    std::cout << "[HIP] Renderowanie i pobieranie danych zakończone sukcesem!\n";
+    // (Opcjonalnie: Zapisz wektor h_output do pliku .png używając OpenImageIO z OSL)
+
+    // 7. Sprzątanie VRAM
+    HIP_CHECK_VOID(hipFree((void*)d_output));
+    
+    
+
 }
 
