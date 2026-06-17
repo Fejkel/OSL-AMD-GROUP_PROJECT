@@ -37,6 +37,8 @@
 // Odniesienie do mapy z backendllvm.cpp
 extern std::map<std::string, std::string> g_amdgpu_temp_cache;
 
+// NEWNEW - KB
+#include <unordered_map>
 // END NEW
 
 using namespace OSL;
@@ -67,6 +69,10 @@ extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 
 
 OSL_NAMESPACE_BEGIN
+
+// NEWNEW - KB
+std::map<const void*, std::vector<uint8_t>> g_amdgpu_elf_registry;
+std::mutex g_amdgpu_registry_mutex;
 
 // NEW
 static OSL::GPUTargetDesc make_amdgpu_target(const std::vector<std::string>& archs) {
@@ -1633,14 +1639,17 @@ osl_simd_caps()
     // clang-format on
 }
 
-// NEW - KB
+// NEWNEW - KB
 void 
 ShadingSystemImpl::amdgpu_cache_unwrap(const std::string& cache_value, ShaderGroup& group)
 {
-    // Zamieniamy string z cache na wektor bajtów
+    // 1. Zamieniamy string z cache na wektor bajtów
     std::vector<uint8_t> data(cache_value.begin(), cache_value.end());
     
-    // Pakujemy to z powrotem do wektora artefaktów, który stworzyliśmy wcześniej
+    // 2. Synchronizacja: zapisujemy do pola, z którego korzysta nasz rejestr
+    group.m_amdgpu_elf = data; 
+    
+    // 3. Pakujemy to do kontenera OSL (tak jak robiłeś to wcześniej)
     group.m_compiled_gpu_artifacts.push_back(
         CompiledGPUArtifact(data, m_amdgpu_architecture.string(), "llvm_bitcode", OSL_LLVM_VERSION)
     );
@@ -3839,7 +3848,11 @@ ShadingSystemImpl::group_post_jit_cleanup(ShaderGroup& group)
     }
 }
 
-
+    //NEWNEW
+void register_amdgpu_artifact_in_registry(const void* group_ptr, const std::vector<uint8_t>& elf_data) {
+    std::lock_guard<std::mutex> lock(g_amdgpu_registry_mutex);
+    g_amdgpu_elf_registry[group_ptr] = elf_data;
+}
 
 void
 ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
@@ -3975,16 +3988,53 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                 std::stringstream buffer;
                 buffer << in_file.rdbuf();
                 cache_value = buffer.str();
-                
                 cached = true;
                 amdgpu_cache_unwrap(cache_value, group);
+                // NEWNEW
+                register_amdgpu_artifact_in_registry(&group, group.m_amdgpu_elf);
                 
-                // Użyj .c_str() żeby %s zadziałało:
-                info(OIIO::Strutil::format("Zastosowano AMDGPU Cache z dysku dla grupy %s", group.name().c_str()));
+                static std::once_flag cache_logged_flag;
+                std::call_once(cache_logged_flag, [this]() {
+                    this->info("INFO: Zastosowano AMDGPU Cache z dysku...");
+                });
             }
         }
 
         if (!cached) {
+            // NEWNEW - KB
+            // Sprawdzamy, czy użytkownik zażądał kompilacji na AMDGPU
+            if (use_amdgpu_cache() || !m_amdgpu_architecture.string().empty()) {
+                
+                // 1. Tworzymy instancję backendu LLVM
+                BackendLLVM lljitter(*this, group, ctx);
+                
+                std::cout << "[DEBUG] Backend utworzony. Wywołuję run()...\n";
+
+                // 2. Czy lljitter wymaga jawnego uruchomienia? Spróbuj odkomentować/dodać:
+                lljitter.run(); 
+
+                // 3. Teraz pobierz bitcode
+                std::vector<uint8_t> amd_elf = lljitter.get_llvm_bitcode();
+
+                std::cout << "[DEBUG] Rozmiar pobranego bitkodu: " << amd_elf.size() << " bajtów.\n"; 
+                                
+                if (amd_elf.empty()) {
+                    error(OIIO::Strutil::format("Blad: Kompilacja do AMDGPU ELF dla grupy %s nie powiodla sie!", group.name().c_str()));
+                } else {
+                    // 3. Zapisujemy wygenerowane artefakty w grupie shaderów
+                    // Zakładam, że macie w klasie ShaderGroup pole na binaria AMD, np. m_amdgpu_elf
+                    group.m_amdgpu_elf = amd_elf; 
+                    
+                    // NEWNEW - KB 
+                    register_amdgpu_artifact_in_registry(&group, amd_elf);
+                    
+                    info(OIIO::Strutil::format("Sukces: Wygenerowano i zaladowano AMDGPU ELF dla %s", group.name().c_str()));
+                }
+                
+                // Ustawiamy flagę, że grupa została przetworzona, aby uniknąć standardowego czyszczenia CPU
+                group.m_jitted = true; 
+
+            } else {
             BackendLLVM lljitter(*this, group, ctx);
             lljitter.run();
 
@@ -4003,6 +4053,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             }
 
             group.m_jitted = true;
+            
             spin_lock stat_lock(m_stat_mutex);
             m_stat_opt_locking_time += locking_time;
             m_stat_optimization_time += timer();
@@ -4013,6 +4064,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             m_stat_llvm_jit_time += lljitter.m_stat_llvm_jit_time;
             m_stat_max_llvm_local_mem = std::max(m_stat_max_llvm_local_mem,
                                                  lljitter.m_llvm_local_mem);
+            }
         }
     }
 
@@ -4981,4 +5033,30 @@ osl_incr_get_userdata_calls(void* sg_)
 {
     ShaderGlobals* sg = (ShaderGlobals*)sg_;
     sg->context->incr_get_userdata_calls();
+}
+
+//NEWNEW - KB
+
+// Ta funkcja będzie widoczna w całym projekcie
+extern "C" OSLEXECPUBLIC bool OSL_get_amdgpu_artifact(const void* group_ptr, uint8_t* out_buffer, size_t* out_size) {
+    std::lock_guard<std::mutex> lock(g_amdgpu_registry_mutex);
+    
+    // Szukamy używając wskaźnika! Bez konwersji na std::string
+    auto it = g_amdgpu_elf_registry.find(group_ptr);
+    
+    if (it == g_amdgpu_elf_registry.end()) {
+        return false; // Nie znaleziono artefaktu dla tej grupy
+    }
+    
+    // Jeśli podano bufor, kopiujemy dane
+    if (out_buffer != nullptr) {
+        std::memcpy(out_buffer, it->second.data(), it->second.size());
+    }
+    
+    // Zwracamy rozmiar, żeby runtime wiedział ile pamięci zaalokować
+    if (out_size != nullptr) {
+        *out_size = it->second.size();
+    }
+    
+    return true;
 }
