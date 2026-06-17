@@ -2113,8 +2113,10 @@ private:
 
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
-
-    std::vector<OSL::CompiledGPUArtifact> m_compiled_gpu_artifacts; //NEW
+    
+    // NASZ KONTENER NA BINARIA AMDGPU
+    std::vector<uint8_t> m_amdgpu_elf;  //NEWNEW - KB
+    std::vector<OSL::CompiledGPUArtifact> m_compiled_gpu_artifacts; //NEWNEW - KB
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params

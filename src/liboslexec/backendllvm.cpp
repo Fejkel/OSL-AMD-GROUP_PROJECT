@@ -954,6 +954,9 @@ BackendLLVM::find_userdata_index(const Symbol& sym)
 
 // NEW - KB (ZAMIAST OLKA) - wyciąganie binarnego bitkodu LLVM dla AMDGPU
 std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
+    shadingsys().info("=========================================");
+    shadingsys().info("JESTEM W GET_LLVM_BITCODE DLA AMD!");
+    shadingsys().info("=========================================");
     // 1. Inicjalizacja komponentów LLVM dla architektury AMDGPU.
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTarget();

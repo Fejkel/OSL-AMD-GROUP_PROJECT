@@ -45,6 +45,9 @@
 extern int testshade_llvm_compiled_rs_size;
 extern unsigned char testshade_llvm_compiled_rs_block[];
 
+//NEWNEW - KB
+extern "C" bool OSL_get_amdgpu_artifact(const void* group_ptr, uint8_t* out_buffer, size_t* out_size);
+
 using namespace OSL;
 using OIIO::ParamValue;
 using OIIO::ParamValueList;
@@ -2288,60 +2291,50 @@ test_shade(int argc, const char* argv[])
 
     double runtime = timer.lap();
 
-    // NEW - NATAN (Integracja Architektury AMDGPU)
-    // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
-    if (!amdgpu_arch.empty()) {
-        
-        // 1. Inicjalizacja Twojego polimorficznego renderera
-        std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
-        gpu_renderer->init();
 
-        int num_artifacts = 0;
-        if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
-            for (int i = 0; i < num_artifacts; ++i) {
-                const void* data_ptr = nullptr;
-                size_t artifact_size = 0; 
-                ustring arch, format;
+// NEWNEW - KB --> - NATAN & KB (Integracja Ścieżki AMDGPU)
+if (!amdgpu_arch.empty()) {
+    
+    // 1. Inicjalizacja polimorficznego renderera Natana
+    std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
+    gpu_renderer->init();
 
-                std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
-                std::string attr_size = OIIO::Strutil::format("gpu_artifact:%d:size", i); 
-                std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
-                std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
+    size_t artifact_size = 0;
+    // NEWNEW - KB
+    const void* group_ptr = shadergroup.get();
 
-                if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::UINT64, &artifact_size) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
+    // Sprawdzamy w naszym globalnym rejestrze, czy KB wygenerował ELF dla tej grupy
+      if (OSL_get_amdgpu_artifact(group_ptr, nullptr, &artifact_size) && artifact_size > 0) {
+        std::vector<uint8_t> local_elf_buffer(artifact_size);
+        OSL_get_amdgpu_artifact(group_ptr, local_elf_buffer.data(), &artifact_size);
 
-                    // 2. Pakowanie danych do Twojej uniwersalnej struktury
-                    GPUShaderModuleDesc desc;
-                    desc.architecture = arch.string();
-                    desc.format = format.string();
-                    desc.data_ptr = data_ptr;
-                    desc.data_size = artifact_size;
+        // 2. Pakowanie danych do uniwersalnej struktury Natana
+        GPUShaderModuleDesc desc;
+        desc.architecture = amdgpu_arch;            // np. "gfx1151"
+        desc.format = "amdgpu_elf";                 // informacja dla HIP, że to gotowy ELF
+        desc.data_ptr = local_elf_buffer.data();
+        desc.data_size = artifact_size;
 
-                    // 3. Ładowanie bajtów do sztucznego środowiska HIP
-                    gpu_renderer->load_shader(desc);
+        // 3. Ładowanie bajtów do środowiska HIP (wywoła hipModuleLoadData pod spodem)
+        gpu_renderer->load_shader(desc);
 
-                    // 4. (Opcjonalnie) Zapis na dysk, jeśli podano flagę --save-amdgpu
-                    if (save_amdgpu) {
-                        std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
-                        std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
-                        std::ofstream outfile(out_filename, std::ios::binary);
-                        if (outfile.is_open()) {
-                            outfile.write((const char*)data_ptr, artifact_size);
-                            std::cout << "[Testshade] Zapisano artefakt na dysk: " << out_filename << "\n";
-                        }
-                    }
-                }
+        // 4. Zapis na dysk (jeśli pracownik AMD chce wyciągnąć sam plik .o do analizy)
+        if (save_amdgpu) {
+            std::string out_filename = OIIO::Strutil::format("shader_%s.o", amdgpu_arch.c_str());
+            std::ofstream outfile(out_filename, std::ios::binary);
+            if (outfile.is_open()) {
+                outfile.write((const char*)local_elf_buffer.data(), artifact_size);
+                std::cout << "[Testshade] Zapisano artefakt maszynowy AMD na dysk: " << out_filename << "\n";
             }
-        } else {
-            std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
         }
-
-        // 5. Finałowy "render" w HIP
-        gpu_renderer->render(xres, yres); 
+    } else {
+        std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem Registry for group: " << group_ptr << "\n";
     }
+
+    // 5. Finałowy "render" w HIP na GPU AMD!
+    std::cout << "[HIP] Rozpoczęcie renderowania sprzętowego. Rozdzielczość: " << xres << "x" << yres << "\n";
+    gpu_renderer->render(xres, yres); 
+}
 
     // This awkward condition preserves an output oddity from long ago,
     // eliminating the need to update hundreds of ref outputs.
