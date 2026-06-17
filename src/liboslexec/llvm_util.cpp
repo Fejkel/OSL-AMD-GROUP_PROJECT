@@ -42,6 +42,7 @@ OSL_GCC_PRAGMA(GCC diagnostic ignored "-Wmaybe-uninitialized")
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/ValueSymbolTable.h>
+#include <llvm/IR/CallingConv.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/ErrorOr.h>
@@ -6519,6 +6520,25 @@ bool
 LLVM_Util::amdgpu_compile_group(llvm::Module*, const std::string& name,
                                 std::string& out, const std::string& gpu_arch)
 {
+
+  std::cout << "\n[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---\n";
+    for (llvm::Function &F : *module()) {
+        if (!F.isDeclaration()) {
+            std::string fname = F.getName().str();
+            std::cout << "[LLVM AMDGPU] Zdefiniowano: " << fname << "\n";
+            
+            // Szukamy szeroko: cokolwiek co w nazwie ma "group" lub "exec"
+            if (fname.find("group") != std::string::npos || fname.find("exec") != std::string::npos) {
+                std::cout << "[LLVM AMDGPU] ---> ZNALEZIONO KERNEL! Ustawiam AMDGPU_KERNEL i ExternalLinkage\n";
+                
+                // To upewni się, że sterownik HIP zobaczy Kernel:
+                F.setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+                F.setLinkage(llvm::GlobalValue::ExternalLinkage);
+            }
+        }
+    }
+    std::cout << "[LLVM AMDGPU] ----------------------------------\n\n";
+    // ---------------------------------------------------------------
 
     llvm::TargetMachine* target_machine = amdgpu_target_machine(gpu_arch);
     llvm::legacy::PassManager mpm;

@@ -2291,6 +2291,7 @@ test_shade(int argc, const char* argv[])
 
     double runtime = timer.lap();
 
+<<<<<<< HEAD
 
 // NEWNEW - KB --> - NATAN & KB (Integracja Ścieżki AMDGPU)
 if (!amdgpu_arch.empty()) {
@@ -2325,10 +2326,66 @@ if (!amdgpu_arch.empty()) {
             if (outfile.is_open()) {
                 outfile.write((const char*)local_elf_buffer.data(), artifact_size);
                 std::cout << "[Testshade] Zapisano artefakt maszynowy AMD na dysk: " << out_filename << "\n";
+=======
+    // NEW - NATAN (Integracja Architektury AMDGPU)
+    // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
+    // NEW - NATAN (Integracja Architektury AMDGPU)
+    // NEW - NATAN (Integracja Architektury AMDGPU)
+    if (!amdgpu_arch.empty()) {
+        
+        std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
+        gpu_renderer->init();
+
+        int num_artifacts = 0;
+        if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
+            for (int i = 0; i < num_artifacts; ++i) {
+                const void* data_ptr = nullptr;
+                size_t artifact_size = 0;
+                int artifact_size_int = 0;
+
+                // POPRAWKA: Bezpieczne klejenie stringów (omijamy błąd z %d)
+                std::string attr_data = "gpu_artifact:" + std::to_string(i) + ":data";
+                std::string attr_size = "gpu_artifact:" + std::to_string(i) + ":size";
+
+                // Wyciąganie wskaźnika na dane
+                bool has_data = shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr);
+                
+                // Wyciąganie rozmiaru (próbujemy typów INT i INT64 dla 100% pewności)
+                bool has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT, &artifact_size_int);
+                if (has_size) {
+                    artifact_size = artifact_size_int;
+                } else {
+                    int64_t sz64 = 0;
+                    has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT64, &sz64);
+                    artifact_size = sz64;
+                }
+
+                if (has_data && has_size) {
+                    GPUShaderModuleDesc desc;
+                    desc.architecture = amdgpu_arch;
+                    desc.format = "hsaco";
+                    desc.data_ptr = data_ptr;
+                    desc.data_size = artifact_size;
+
+                    gpu_renderer->load_shader(desc);
+
+                    if (save_amdgpu) {
+                        std::string out_filename = "shader_" + amdgpu_arch + ".hsaco";
+                        std::ofstream outfile(out_filename, std::ios::binary);
+                        if (outfile.is_open()) {
+                            outfile.write((const char*)data_ptr, artifact_size);
+                            std::cout << "[Testshade] Zapisano natywny artefakt na dysk: " << out_filename << "\n";
+                        }
+                    }
+                } else {
+                    std::cerr << "[Testshade] Błąd wyciągania atrybutów dla artefaktu " << i << "\n";
+                }
             }
         }
     } else {
         std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem Registry for group: " << group_ptr << "\n";
+
+        gpu_renderer->render(xres, yres); 
     }
 
     // 5. Finałowy "render" w HIP na GPU AMD!
