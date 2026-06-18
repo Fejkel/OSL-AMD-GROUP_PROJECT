@@ -92,9 +92,10 @@ bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
     std::cout << "[HIP] Sukces (Dry Run): Kod binarny zapisano bezpiecznie na dysk (" << hsaco_filename << ").\n";
 
   
-    HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
-    HIP_CHECK(hipModuleGetFunction(&m_kernel, m_module, "osl_exec_unnamed_group_1"));
-
+    //HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
+    HIP_CHECK(hipModuleLoad(&m_module, "/tmp/osl_linked_shader.hsaco"));
+    HIP_CHECK(hipModuleGetFunction(&m_kernel, m_module, "osl_kernel"));
+    
     return true;
 }
 
@@ -106,6 +107,11 @@ bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
 void HipRaytracer::render(int width, int height) {
     std::cout << "[HIP] Rozpoczęcie renderowania. Rozdzielczość: " 
               << width << "x" << height << "\n";
+    
+    if (!m_kernel) {
+        std::cerr << "[Błąd HIP] Kernel nie jest załadowany! Przerywam renderowanie.\n";
+        return;
+    }
               
               
               

@@ -2379,7 +2379,7 @@ BackendLLVM::run()
                 // If we plan to call bitcode_string of a layer's function after
                 // optimization it may not exist after optimization unless we
                 // treat it as external.
-                if (f && (group().is_entry_layer(layer) || llvm_debug())) {
+                if (f && (group().is_entry_layer(layer) || llvm_debug() || shadingsys().use_amdgpu())) {
                     external_functions.insert(f);
                 }
             }
@@ -2505,7 +2505,7 @@ BackendLLVM::run()
     if (shadingsys().use_amdgpu()) {
         // 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
         // (Wywołujemy bez 'll.'!)
-        std::vector<uint8_t> bitcode = get_llvm_bitcode();
+        std::vector<uint8_t> bitcode = get_llvm_bitcode(init_func->getParent());
         
         if (bitcode.empty()) {
             OSL_ASSERT(0 && "Unable to generate AMDGPU Bitcode");

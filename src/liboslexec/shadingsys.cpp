@@ -4030,7 +4030,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                     
                     info(OIIO::Strutil::format("Sukces: Wygenerowano i zaladowano AMDGPU ELF dla %s", group.name().c_str()));
                 }
-                
+                 
                 // Ustawiamy flagę, że grupa została przetworzona, aby uniknąć standardowego czyszczenia CPU
                 group.m_jitted = true; 
 

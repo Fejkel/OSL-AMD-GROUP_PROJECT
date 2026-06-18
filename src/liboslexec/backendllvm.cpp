@@ -951,7 +951,7 @@ BackendLLVM::find_userdata_index(const Symbol& sym)
     }
     return userdata_index;
 }
-
+/*
 // NEW - KB (ZAMIAST OLKA) - wyciąganie binarnego bitkodu LLVM dla AMDGPU
 std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
     shadingsys().info("=========================================");
@@ -1027,6 +1027,97 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
 
     // Zwracamy wektor bajtów zawierający czysty, skompilowany plik ELF
     return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
-}}; 
+}}; */
+
+std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
+    shadingsys().info("=========================================");
+    shadingsys().info("JESTEM W GET_LLVM_BITCODE DLA AMD!");
+    shadingsys().info("=========================================");
+    
+    // WYBÓR WŁAŚCIWEGO MODUŁU:
+    llvm::Module* mod = custom_mod ? custom_mod : ll.module();
+
+    LLVMInitializeAMDGPUTargetInfo();
+    LLVMInitializeAMDGPUTarget();
+    LLVMInitializeAMDGPUTargetMC();
+    LLVMInitializeAMDGPUAsmPrinter();
+
+    std::string arch_str = shadingsys().amdgpu_architecture().string();
+    if (arch_str.empty()) {
+        arch_str = "gfx1100";
+    }
+
+    std::string llvm_error;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget("amdgcn-amd-amdhsa", llvm_error);
+    if (!target) {
+        shadingsys().error(OIIO::Strutil::format("LLVM Error: Nie znaleziono targetu AMDGPU (%s)", llvm_error.c_str()));
+        return std::vector<uint8_t>();
+    }
+
+    llvm::TargetOptions options;
+    std::optional<llvm::Reloc::Model> relocation_model = llvm::Reloc::PIC_;
+    
+    std::unique_ptr<llvm::TargetMachine> target_machine(
+        target->createTargetMachine("amdgcn-amd-amdhsa", arch_str, "", options, relocation_model)
+    );
+
+    if (!target_machine) {
+        shadingsys().error("LLVM Error: Nie udalo sie stworzyc TargetMachine dla AMDGPU");
+        return std::vector<uint8_t>();
+    }
+
+    // Konfiguracja wybranego modułu pod AMD
+    mod->setDataLayout(target_machine->createDataLayout());
+    mod->setTargetTriple("amdgcn-amd-amdhsa");
+
+    // REJESTRACJA KERNELA DLA NATANA:
+    shadingsys().info("[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---");
+    for (llvm::Function &F : *mod) {
+        if (!F.isDeclaration()) {
+            std::string fname = F.getName().str();
+            shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Zdefiniowano: %s", fname.c_str()));
+            
+            if (fname.find("group") != std::string::npos || 
+                fname.find("exec") != std::string::npos || 
+                fname.find("test") != std::string::npos) {
+                
+                shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] ---> ZNALEZIONO KERNEL GLOWNY! Ustawiam AMDGPU_KERNEL, ExternalLinkage i zmieniałem nazwę na 'osl_kernel'"));
+                F.setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+                F.setLinkage(llvm::GlobalValue::ExternalLinkage);
+                F.setName("osl_kernel");
+                break; 
+            }
+        }
+    }
+    shadingsys().info("[LLVM AMDGPU] ----------------------------------");
+
+    llvm::SmallVector<char, 4096> elf_buffer;
+    llvm::raw_svector_ostream dest(elf_buffer);
+
+    llvm::legacy::PassManager code_gen_pm;
+    if (target_machine->addPassesToEmitFile(code_gen_pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+        shadingsys().error("LLVM Error: Backend kompilatora LLVM 18 nie wspiera bezpośredniej emisji ELF dla AMDGPU");
+        return std::vector<uint8_t>();
+    }
+
+    code_gen_pm.run(*mod);
+
+    std::string cache_key = group().amdgpu_cache_key() + "_AMDGPU_" + arch_str;
+    std::string cache_value(elf_buffer.begin(), elf_buffer.end());
+    
+    std::string filename = "/tmp/" + cache_key + ".bin";
+    std::ofstream out_file(filename, std::ios::binary);
+    if (out_file.is_open()) {
+        out_file.write(cache_value.data(), cache_value.size());
+        out_file.close();
+        shadingsys().info(OIIO::Strutil::format("Zapisano gotowy AMDGPU ELF do pamięci podręcznej dysku"));
+    }
+
+    return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
+}
+
+}
+
+
 // namespace pvt
 OSL_NAMESPACE_END
