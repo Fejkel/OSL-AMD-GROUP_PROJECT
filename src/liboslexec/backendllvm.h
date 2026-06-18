@@ -45,7 +45,7 @@ public:
     void prepare_module_for_cuda_jit();
 
 // NEW - KB (ZAMIAST OLKA)  wyciąganie binarnego bitkodu LLVM dla AMDGPU
-    std::vector<uint8_t> get_llvm_bitcode();
+    std::vector<uint8_t> get_amdgpu_code_object();
 
     /// What LLVM debug level are we at?
     int llvm_debug() const;
@@ -66,6 +66,7 @@ public:
     // Create llvm functions for OptiX callables
     std::vector<llvm::Function*> build_llvm_optix_callables();
     llvm::Function* build_llvm_fused_callable();
+    llvm::Function* build_llvm_amdgpu_wrapper_kernel();
 
     /// Build up LLVM IR code for the given range [begin,end) or
     /// opcodes, putting them (initially) into basic block bb (or the

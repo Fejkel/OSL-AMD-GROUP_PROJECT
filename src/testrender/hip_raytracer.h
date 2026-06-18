@@ -17,4 +17,6 @@ public:
 private:
     // Zmienna przechowująca skompilowany kod na karcie graficznej
     hipModule_t m_module = nullptr;
+    hipFunction_t m_kernel = nullptr;
+    std::string m_device_architecture;
 };

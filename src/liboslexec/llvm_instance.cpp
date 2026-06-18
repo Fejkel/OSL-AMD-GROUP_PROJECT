@@ -18,8 +18,12 @@
 #include <OpenImageIO/sysutil.h>
 #include <OpenImageIO/timer.h>
 
+#include <OSL/amdgpu_kernel.h>
+
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
+
+#include <llvm/IR/CallingConv.h>
 
 #if OSL_USE_OPTIX
 #    include <llvm/Linker/Linker.h>
@@ -1545,6 +1549,133 @@ BackendLLVM::build_llvm_fused_callable(void)
 }
 
 llvm::Function*
+BackendLLVM::build_llvm_amdgpu_wrapper_kernel()
+{
+    ll.current_function(
+        ll.make_function(OSL_AMDGPU_RENDER_KERNEL_NAME, false,
+                         ll.type_void(),  // return type
+                         {
+                             ll.type_void_ptr(),  // output_base_ptr
+                             ll.type_int(),       // width
+                             ll.type_int(),       // height
+                             ll.type_void_ptr(),  // renderer groupdata ptr
+                             ll.type_void_ptr(),  // userdata_base_ptr
+                             ll.type_void_ptr(),  // interactive params
+                         }));
+
+    llvm::Function* kernel = ll.current_function();
+    kernel->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+    kernel->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    kernel->addFnAttr("amdgpu-flat-work-group-size", "1,256");
+
+    llvm::BasicBlock* entry_bb = ll.new_basic_block(
+        OSL_AMDGPU_RENDER_KERNEL_NAME);
+    ll.new_builder(entry_bb);
+
+    llvm::Value* output_base_ptr = ll.current_function_arg(0);
+    output_base_ptr->setName("output_base_ptr");
+    ll.current_function_arg(1)->setName("width");
+    ll.current_function_arg(2)->setName("height");
+    ll.current_function_arg(3)->setName("renderer_groupdata_ptr");
+    llvm::Value* userdata_base_ptr = ll.current_function_arg(4);
+    userdata_base_ptr->setName("userdata_base_ptr");
+    llvm::Value* interactive_params_ptr = ll.current_function_arg(5);
+    interactive_params_ptr->setName("interactive_params_ptr");
+
+    llvm::Value* shaderglobals_ptr = ll.op_alloca(llvm_type_sg(), 1,
+                                                  "shaderglobals", 8);
+    ll.op_memset(ll.void_ptr(shaderglobals_ptr), 0,
+                 sizeof(OSL::ShaderGlobals), 8);
+
+    llvm::Value* groupdata_ptr = ll.op_alloca(llvm_type_groupdata(), 1,
+                                              "groupdata_buffer", 8);
+
+    auto store_sg_scalar = [&](ustring name, llvm::Value* value) {
+        int sg_index = ShaderGlobalNameToIndex(name);
+        OSL_ASSERT(sg_index >= 0);
+        ll.op_unmasked_store(value,
+                             ll.GEP(llvm_type_sg(), shaderglobals_ptr, 0,
+                                    sg_index));
+    };
+
+    auto store_triple = [&](llvm::Value* triple_ptr, float x, float y,
+                            float z) {
+        ll.op_unmasked_store(ll.constant(x),
+                             ll.GEP(ll.type_triple(), triple_ptr, 0, 0));
+        ll.op_unmasked_store(ll.constant(y),
+                             ll.GEP(ll.type_triple(), triple_ptr, 0, 1));
+        ll.op_unmasked_store(ll.constant(z),
+                             ll.GEP(ll.type_triple(), triple_ptr, 0, 2));
+    };
+
+    auto store_sg_triple = [&](ustring name, float x, float y, float z) {
+        int sg_index = ShaderGlobalNameToIndex(name);
+        OSL_ASSERT(sg_index >= 0);
+        llvm::Value* triple_ptr = ll.GEP(llvm_type_sg(), shaderglobals_ptr, 0,
+                                         sg_index);
+        store_triple(triple_ptr, x, y, z);
+    };
+
+    auto store_sg_deriv_float = [&](ustring name, float value) {
+        int sg_index = ShaderGlobalNameToIndex(name);
+        OSL_ASSERT(sg_index >= 0);
+        llvm::Value* field_ptr = ll.GEP(llvm_type_sg(), shaderglobals_ptr, 0,
+                                        sg_index);
+        llvm::Type* field_type
+            = ll.type_struct_field_at_index(llvm_type_sg(), sg_index);
+        ll.op_unmasked_store(ll.constant(value),
+                             ll.GEP(field_type, field_ptr, 0, 0));
+    };
+
+    auto store_sg_deriv_triple = [&](ustring name, float x, float y, float z) {
+        int sg_index = ShaderGlobalNameToIndex(name);
+        OSL_ASSERT(sg_index >= 0);
+        llvm::Value* field_ptr = ll.GEP(llvm_type_sg(), shaderglobals_ptr, 0,
+                                        sg_index);
+        llvm::Type* field_type
+            = ll.type_struct_field_at_index(llvm_type_sg(), sg_index);
+        llvm::Value* triple_ptr = ll.GEP(field_type, field_ptr, 0, 0);
+        store_triple(triple_ptr, x, y, z);
+    };
+
+    llvm::Value* shadeindex = ll.constant(0);
+    store_sg_scalar(ustring("thread_index"), shadeindex);
+    store_sg_scalar(ustring("shade_index"), shadeindex);
+    store_sg_scalar(ustring("surfacearea"), ll.constant(1.0f));
+
+    store_sg_deriv_float(ustring("u"), 0.5f);
+    store_sg_deriv_float(ustring("v"), 0.5f);
+    store_sg_deriv_triple(ustring("P"), 0.5f, 0.5f, 1.0f);
+    store_sg_deriv_triple(ustring("I"), 0.0f, 0.0f, -1.0f);
+    store_sg_triple(ustring("N"), 0.0f, 0.0f, 1.0f);
+    store_sg_triple(ustring("Ng"), 0.0f, 0.0f, 1.0f);
+    store_sg_triple(ustring("dPdu"), 1.0f, 0.0f, 0.0f);
+    store_sg_triple(ustring("dPdv"), 0.0f, 1.0f, 0.0f);
+
+    llvm::Value* args[] = {
+        shaderglobals_ptr,
+        groupdata_ptr,
+        userdata_base_ptr,
+        output_base_ptr,
+        shadeindex,
+        interactive_params_ptr,
+    };
+
+    std::string init_name = init_function_name(shadingsys(), group());
+    ll.call_function(init_name.c_str(), args);
+
+    int nlayers          = group().nlayers();
+    ShaderInstance* inst = group()[nlayers - 1];
+    std::string layer_name = layer_function_name(group(), *inst);
+    ll.call_function(layer_name.c_str(), args);
+
+    ll.op_return();
+    ll.end_builder();
+
+    return kernel;
+}
+
+llvm::Function*
 BackendLLVM::build_llvm_instance(bool groupentry)
 {
     // Make a layer function: void layer_func(ShaderGlobals*, GroupData*)
@@ -1882,10 +2013,11 @@ BackendLLVM::initialize_llvm_group()
     }
 
     // Set up optimization passes. Don't target the host if we're building
-    // for OptiX.
+    // for a GPU backend.
     ll.setup_optimization_passes(shadingsys().llvm_optimize(),
                                  shadingsys().llvm_target_host()
-                                     && !use_optix());
+                                     && !use_optix()
+                                     && !shadingsys().use_amdgpu());
 
     // Clear the shaderglobals and groupdata types -- they will be
     // created on demand.
@@ -2339,6 +2471,10 @@ BackendLLVM::run()
     if (use_optix())
         optix_externals = build_llvm_optix_callables();
 
+    llvm::Function* amdgpu_kernel = nullptr;
+    if (shadingsys().use_amdgpu())
+        amdgpu_kernel = build_llvm_amdgpu_wrapper_kernel();
+
     // llvm::Function* entry_func = group().num_entry_layers() ? NULL : funcs[m_num_used_layers-1];
     m_stat_llvm_irgen_time += timer.lap();
 
@@ -2371,6 +2507,8 @@ BackendLLVM::run()
         if (use_optix()) {
             for (llvm::Function* func : optix_externals)
                 external_functions.insert(func);
+        } else if (shadingsys().use_amdgpu()) {
+            external_functions.insert(amdgpu_kernel);
         } else {
             external_functions.insert(init_func);
 
@@ -2505,14 +2643,15 @@ BackendLLVM::run()
     if (shadingsys().use_amdgpu()) {
         // 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
         // (Wywołujemy bez 'll.'!)
-        std::vector<uint8_t> bitcode = get_llvm_bitcode();
+        std::vector<uint8_t> code_object = get_amdgpu_code_object();
         
-        if (bitcode.empty()) {
-            OSL_ASSERT(0 && "Unable to generate AMDGPU Bitcode");
+        if (code_object.empty()) {
+            OSL_ASSERT(0 && "Unable to generate AMDGPU code object");
         } else {
             // 2. Pakujemy gotowe bajty w nasz nowy Artefakt i dodajemy do wektora Kacpra
             group().m_compiled_gpu_artifacts.push_back(
-            CompiledGPUArtifact(bitcode, shadingsys().amdgpu_architecture().string(), "llvm_bitcode", OSL_LLVM_VERSION)            );
+                CompiledGPUArtifact(code_object, shadingsys().amdgpu_architecture().string(),
+                                    "amdgpu_code_object", OSL_LLVM_VERSION));
         }
     } else
 #endif

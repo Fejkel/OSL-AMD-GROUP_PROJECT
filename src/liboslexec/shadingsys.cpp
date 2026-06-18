@@ -73,7 +73,7 @@ static OSL::GPUTargetDesc make_amdgpu_target(const std::vector<std::string>& arc
     return OSL::GPUTargetDesc(OSL::GPUBackendKind::AMDGPU, 
                               "amdgcn-amd-amdhsa", 
                               archs, 
-                              "llvm_bitcode");
+                              "amdgpu_code_object");
 }
 
 static OSL::GPUTargetDesc make_nvptx_target() {
@@ -1642,7 +1642,8 @@ ShadingSystemImpl::amdgpu_cache_unwrap(const std::string& cache_value, ShaderGro
     
     // Pakujemy to z powrotem do wektora artefaktów, który stworzyliśmy wcześniej
     group.m_compiled_gpu_artifacts.push_back(
-        CompiledGPUArtifact(data, m_amdgpu_architecture.string(), "llvm_bitcode", OSL_LLVM_VERSION)
+        CompiledGPUArtifact(data, m_amdgpu_architecture.string(),
+                            "amdgpu_code_object", OSL_LLVM_VERSION)
     );
 }
 // END NEW
@@ -3958,7 +3959,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             }
         }
         // NEW - KB
-        else if (use_amdgpu_cache()) { 
+        else if (use_amdgpu() && use_amdgpu_cache()) {
             // 1. Pobieramy unikalny klucz dla tej grupy shaderów
             std::string cache_key = group.amdgpu_cache_key() 
                                   + "_AMDGPU_" 

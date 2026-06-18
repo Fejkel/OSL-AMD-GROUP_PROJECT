@@ -953,7 +953,7 @@ BackendLLVM::find_userdata_index(const Symbol& sym)
 }
 
 // NEW - KB (ZAMIAST OLKA) - wyciąganie binarnego bitkodu LLVM dla AMDGPU
-std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
+std::vector<uint8_t> BackendLLVM::get_amdgpu_code_object() {
     // 1. Inicjalizacja komponentów LLVM dla architektury AMDGPU.
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTarget();
@@ -1024,6 +1024,7 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
 
     // Zwracamy wektor bajtów zawierający czysty, skompilowany plik ELF
     return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
-}}; 
-// namespace pvt
+}
+
+}  // namespace pvt
 OSL_NAMESPACE_END

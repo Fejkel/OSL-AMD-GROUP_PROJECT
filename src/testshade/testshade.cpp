@@ -4,6 +4,7 @@
 
 
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <locale>
@@ -1997,9 +1998,11 @@ test_shade(int argc, const char* argv[])
     //NEW - Ka
     // Configure AMDGPU target architecture if requested via CLI.
     if (!amdgpu_arch.empty()) {
+        shadingsys->attribute("amdgpu", 1);
         shadingsys->attribute("amdgpu_architecture", amdgpu_arch);
-        if (verbose)
-        std::cout << "Setting OSL attribute: amdgpu_target = " << amdgpu_arch << "\n";
+        if (verbose) {
+            std::cout << "Setting OSL AMDGPU target = " << amdgpu_arch << "\n";
+        }
     }
 
     rend->init_shadingsys(shadingsys);
@@ -2291,12 +2294,14 @@ test_shade(int argc, const char* argv[])
     // NEW - NATAN (Integracja Architektury AMDGPU)
     // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
     if (!amdgpu_arch.empty()) {
-        
-        // 1. Inicjalizacja Twojego polimorficznego renderera
         std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
-        gpu_renderer->init();
+        if (!gpu_renderer->init()) {
+            std::cerr << "[Testshade] Nie udalo sie zainicjalizowac HIP.\n";
+            return EXIT_FAILURE;
+        }
 
         int num_artifacts = 0;
+        bool loaded_gpu_module = false;
         if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
             for (int i = 0; i < num_artifacts; ++i) {
                 const void* data_ptr = nullptr;
@@ -2308,44 +2313,70 @@ test_shade(int argc, const char* argv[])
                 std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
                 std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
 
-                if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::UINT64, &artifact_size) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
+                bool has_data = shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr);
+                int64_t artifact_size_i64 = 0;
+                bool has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT64,
+                                                         &artifact_size_i64);
+                if (!has_size) {
+                    int artifact_size_int = 0;
+                    has_size = shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::INT,
+                                                        &artifact_size_int);
+                    artifact_size_i64 = artifact_size_int;
+                }
+                bool has_arch = shadingsys->getattribute(shadergroup.get(), attr_arch, arch);
+                bool has_format = shadingsys->getattribute(shadergroup.get(), attr_form, format);
 
-                    // 2. Pakowanie danych do Twojej uniwersalnej struktury
+                if (has_data && has_size && has_arch && has_format && artifact_size_i64 > 0) {
+                    artifact_size = static_cast<size_t>(artifact_size_i64);
+                    std::string arch_string = arch.string();
+                    std::string format_string = format.string();
+
                     GPUShaderModuleDesc desc;
-                    desc.architecture = arch.string();
-                    desc.format = format.string();
+                    desc.architecture = arch_string.empty() ? amdgpu_arch : arch_string;
+                    desc.format = format_string;
                     desc.data_ptr = data_ptr;
                     desc.data_size = artifact_size;
 
-                    // 3. Ładowanie bajtów do sztucznego środowiska HIP
-                    gpu_renderer->load_shader(desc);
-
-                    // 4. (Opcjonalnie) Zapis na dysk, jeśli podano flagę --save-amdgpu
                     if (save_amdgpu) {
-                        std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
-                        std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
+                        std::string ext = ".bin";
+                        if (format_string == "llvm_bitcode") {
+                            ext = ".bc";
+                        } else if (format_string == "amdgpu_object") {
+                            ext = ".o";
+                        } else if (format_string == "hsaco" || format_string == "amdgpu_code_object") {
+                            ext = ".hsaco";
+                        }
+                        std::string out_filename = OIIO::Strutil::format(
+                            "shader_%s%s", desc.architecture.c_str(), ext);
                         std::ofstream outfile(out_filename, std::ios::binary);
                         if (outfile.is_open()) {
                             outfile.write((const char*)data_ptr, artifact_size);
                             std::cout << "[Testshade] Zapisano artefakt na dysk: " << out_filename << "\n";
                         }
                     }
+
+                    if (gpu_renderer->load_shader(desc)) {
+                        loaded_gpu_module = true;
+                        break;
+                    }
+                } else {
+                    std::cerr << "[Testshade] Nie udalo sie odczytac artefaktu AMDGPU nr "
+                              << i << " z ShadingSystem.\n";
                 }
             }
         } else {
             std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
         }
 
-        // 5. Finałowy "render" w HIP
+        if (!loaded_gpu_module) {
+            std::cerr << "[Testshade] Nie zaladowano wykonywalnego modulu HIP. "
+                      << "Render GPU zostal pominiety.\n";
+            return EXIT_FAILURE;
+        }
+
         gpu_renderer->render(xres, yres); 
     }
 
-    // This awkward condition preserves an output oddity from long ago,
-    // eliminating the need to update hundreds of ref outputs.
-    if (outputfiles.size() == 1 && outputfiles[0] == "null")
     // This awkward condition preserves an output oddity from long ago,
     // eliminating the need to update hundreds of ref outputs.
     if (outputfiles.size() == 1 && outputfiles[0] == "null")
