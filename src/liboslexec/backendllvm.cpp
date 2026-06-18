@@ -20,6 +20,8 @@
 
 // WŁAŚCIWY NAGŁÓWEK DLA RE REJESTRACJI STAREGO PASS MANAGERA W LLVM 18:
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
 
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/strutil.h>
@@ -1103,23 +1105,101 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
               << " niepotrzebnych funkcji z modułu AMD.\n";
 //-----------------------------
     // REJESTRACJA KERNELA DLA NATANA:
-    shadingsys().info("[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---");
+    // --- REJESTRACJA KERNELA DLA AMDGPU ---
+    shadingsys().info("[LLVM AMDGPU] --- Szukanie funkcji w bitcode i budowa Wrappera ---");
+    
+    llvm::Function *orig_func = nullptr;
+    
+    // 1. Znajdź faktyczny shader
     for (llvm::Function &F : *mod) {
-        if (!F.isDeclaration()) {
-            std::string fname = F.getName().str();
-            shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Zdefiniowano: %s", fname.c_str()));
-            
-            if (fname.find("group") != std::string::npos || 
-                fname.find("exec") != std::string::npos || 
-                fname.find("test") != std::string::npos) {
-                
-                shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] ---> ZNALEZIONO KERNEL GLOWNY! Ustawiam AMDGPU_KERNEL, ExternalLinkage i zmieniałem nazwę na 'osl_kernel'"));
-                F.setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-                F.setLinkage(llvm::GlobalValue::ExternalLinkage);
-                F.setName("osl_kernel");
-                break; 
+        if (!F.isDeclaration() && (F.getName().find("group") != std::string::npos || F.getName().find("exec") != std::string::npos)) {
+            orig_func = &F;
+            break; 
+        }
+    }
+
+    if (orig_func) {
+        llvm::LLVMContext &ctx = mod->getContext();
+        llvm::FunctionType *orig_type = orig_func->getFunctionType();
+        std::vector<llvm::Type*> wrapper_param_types;
+
+        for (llvm::Type *param_type : orig_type->params()) {
+            if (param_type->isPointerTy()) {
+                wrapper_param_types.push_back(llvm::PointerType::get(ctx, 1)); // AddressSpace(1) dla VRAM
+            } else {
+                wrapper_param_types.push_back(param_type);
             }
         }
+        // Dodajemy 'int width' jako ostatni argument kernela
+        wrapper_param_types.push_back(llvm::Type::getInt32Ty(ctx));
+
+        llvm::FunctionType *wrapper_type = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), wrapper_param_types, false);
+        llvm::Function *wrapper_func = llvm::Function::Create(wrapper_type, llvm::GlobalValue::ExternalLinkage, "osl_kernel", mod);
+        wrapper_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+
+        llvm::BasicBlock *entry_block = llvm::BasicBlock::Create(ctx, "entry", wrapper_func);
+        llvm::IRBuilder<> builder(entry_block);
+
+        // --- MAGIA GPU: POBIERANIE KOORDYNATÓW PIKSELA ---
+        // Ręczna deklaracja zewnętrznych funkcji wbudowanych (niezależna od wersji LLVM)
+        llvm::FunctionType *i32_fn_type = llvm::FunctionType::get(builder.getInt32Ty(), false);
+        
+        llvm::FunctionCallee wg_id_x_c = mod->getOrInsertFunction("llvm.amdgcn.workgroup.id.x", i32_fn_type);
+        llvm::FunctionCallee wg_id_y_c = mod->getOrInsertFunction("llvm.amdgcn.workgroup.id.y", i32_fn_type);
+        llvm::FunctionCallee wi_id_x_c = mod->getOrInsertFunction("llvm.amdgcn.workitem.id.x", i32_fn_type);
+        llvm::FunctionCallee wi_id_y_c = mod->getOrInsertFunction("llvm.amdgcn.workitem.id.y", i32_fn_type);
+
+        llvm::Value *wg_id_x = builder.CreateCall(wg_id_x_c);
+        llvm::Value *wg_id_y = builder.CreateCall(wg_id_y_c);
+        llvm::Value *wi_id_x = builder.CreateCall(wi_id_x_c);
+        llvm::Value *wi_id_y = builder.CreateCall(wi_id_y_c);
+
+        // BlockSize jest 16 (tak ustawiliscie w hip_raytracer)
+        llvm::Value *block_dim = builder.getInt32(16);
+        llvm::Value *global_x = builder.CreateAdd(builder.CreateMul(wg_id_x, block_dim), wi_id_x);
+        llvm::Value *global_y = builder.CreateAdd(builder.CreateMul(wg_id_y, block_dim), wi_id_y);
+
+        // pixel_index = (global_y * width) + global_x
+        llvm::Argument *width_arg = wrapper_func->getArg(orig_func->arg_size()); // Pobieramy dodany int width
+        llvm::Value *pixel_index = builder.CreateAdd(builder.CreateMul(global_y, width_arg), global_x);
+
+        // --- PRZYGOTOWANIE OFFSETÓW DLA ORYGINALNEGO SHADERA ---
+        std::vector<llvm::Value*> call_args;
+        auto orig_arg_it = orig_func->arg_begin();
+        size_t arg_idx = 0;
+
+        for (llvm::Argument &wrap_arg : wrapper_func->args()) {
+            if (arg_idx >= orig_func->arg_size()) break; // Ignorujemy przekazywanie 'width' do OSL
+
+            llvm::Value *final_val = &wrap_arg;
+
+            if (wrap_arg.getType()->isPointerTy()) {
+                if (arg_idx == 0) { 
+                    // Przesunięcie tablicy ShaderGlobals: pixel_index * 256 bajtów
+                    llvm::Value *offset = builder.CreateMul(pixel_index, builder.getInt32(256));
+                    final_val = builder.CreateGEP(builder.getInt8Ty(), &wrap_arg, offset);
+                } else if (arg_idx == 3) { 
+                    // Przesunięcie tablicy Output (RGB floats): pixel_index * 12 bajtów
+                    llvm::Value *offset = builder.CreateMul(pixel_index, builder.getInt32(12));
+                    final_val = builder.CreateGEP(builder.getInt8Ty(), &wrap_arg, offset);
+                }
+                // Rzutowanie do zwykłego wskaźnika dla kodu OSL (AddressSpaceCast)
+                final_val = builder.CreateAddrSpaceCast(final_val, orig_arg_it->getType(), "cast_to_flat");
+            }
+            
+            call_args.push_back(final_val);
+            orig_arg_it++;
+            arg_idx++;
+        }
+
+        builder.CreateCall(orig_type, orig_func, call_args);
+        builder.CreateRetVoid();
+        
+        shadingsys().info("[LLVM AMDGPU] ---> Sukces! Wygenerowano osl_kernel z mapowaniem siatki wątków Radeona.");
+    }
+    
+     else {
+        shadingsys().error("[LLVM AMDGPU] BLAD! Nie znaleziono funkcji do owrapowania!");
     }
     shadingsys().info("[LLVM AMDGPU] ----------------------------------");
 

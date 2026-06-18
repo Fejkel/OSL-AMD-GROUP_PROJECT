@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <hip/hip_runtime.h>
+#include <cstring>
 
 // Makro do wygodnego sprawdzania, czy funkcje HIP nie zwracają błędów
 #define HIP_CHECK(command) \
@@ -156,15 +157,15 @@ void HipRaytracer::render(int width, int height, int groupdata_size, float* host
         for (int x = 0; x < width; ++x) {
             size_t pixel_index = y * width + x;
             char* current_sg_ptr = cpu_sg_buffer.data() + (pixel_index * sg_single_size);
+            
+            // Najpierw zerujemy wszystko (bezpieczne dla wskaźników, staną się nullptr)
+            std::memset(current_sg_ptr, 0, sg_single_size); 
 
-            float u_val = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
-            float v_val = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
-
-            // Wskaźniki na float wewnątrz surowego bufora bajtów (zakładamy początek struktury dla testu)
-            // Jeśli OSL na GPU mapuje to inaczej, przesunięcie (offset) może wymagać dostosowania do definicji struktury z OSL
+            // Wypełniamy tylko pierwsze 16 floatów (zazwyczaj P, dPdu, dPdv, u, v)
             float* sg_floats = reinterpret_cast<float*>(current_sg_ptr);
-            sg_floats[0] = u_val; // przypisanie do u
-            sg_floats[1] = v_val; // przypisanie do v
+            for (int i = 0; i < 16; ++i) {
+                sg_floats[i] = 0.5f; 
+            }
         }
     }
 
@@ -177,10 +178,11 @@ void HipRaytracer::render(int width, int height, int groupdata_size, float* host
     HIP_CHECK_VOID(hipMalloc(&d_shaderglobals, sg_array_size));
     HIP_CHECK_VOID(hipMemcpy(d_shaderglobals, cpu_sg_buffer.data(), sg_array_size, hipMemcpyHostToDevice));
 
-    // Alokujemy groupdata używając rozmiaru przekazanego z OSL
+    // Alokujemy groupdata dla KAŻDEGO piksela
+    size_t total_groupdata_size = groupdata_size * width * height;
     if (groupdata_size > 0) {
-        HIP_CHECK_VOID(hipMalloc(&d_groupdata, groupdata_size));
-        HIP_CHECK_VOID(hipMemset(d_groupdata, 0, groupdata_size));
+        HIP_CHECK_VOID(hipMalloc(&d_groupdata, total_groupdata_size));
+        HIP_CHECK_VOID(hipMemset(d_groupdata, 0, total_groupdata_size));
     }
 
     // Alokujemy bufor wyjściowy (3 kanały: RGB, float)
@@ -193,13 +195,15 @@ void HipRaytracer::render(int width, int height, int groupdata_size, float* host
     int   shadeindex             = 0;       
     void* interactive_params_ptr = nullptr;
 
-    void* kernelArgs[] = {
-        &d_shaderglobals,
-        &d_groupdata,
-        &userdata_base_ptr,
-        &d_output,             
-        &shadeindex,
-        &interactive_params_ptr
+    // Standardowa, najbezpieczniejsza metoda przekazywania argumentów w HIP/CUDA
+    // Kolejność musi ściśle odpowiadać sygnaturze OSL_LLVM_EXEC
+    void* kernel_args[] = {
+        &d_shaderglobals,           // 1. ShaderGlobals*
+        &d_groupdata,               // 2. void* groupdata
+        &userdata_base_ptr,         // 3. void* userdata
+        &d_output,                  // 4. void* output_base
+        &shadeindex,                // 5. int shadeindex
+        &interactive_params_ptr     // 6. void* interactive_params
     };
 
     // 4. KONFIGURACJA SIATKI WĄTKÓW
@@ -210,31 +214,40 @@ void HipRaytracer::render(int width, int height, int groupdata_size, float* host
     std::cout << "[HIP] Uruchamianie kernela. Siatka: " 
               << gridSize.x << "x" << gridSize.y << ", Bloki: 16x16\n";
 
-    // 5. WYWOŁANIE KERNELA
+    // 5. WYWOŁANIE KERNELA (Przekazujemy tablicę kernel_args)
     HIP_CHECK_VOID(hipModuleLaunchKernel(
         m_kernel,
         gridSize.x, gridSize.y, gridSize.z,
         blockSize.x, blockSize.y, blockSize.z,
-        0, nullptr, kernelArgs, nullptr
+        0,          // sharedMemBytes
+        nullptr,    // stream
+        kernel_args,// wskaźnik na tablicę argumentów!
+        nullptr     // extra (config zostawiamy puste)
     ));
 
-    // 6. SYNCHRONIZACJA I POBRANIE WYNIKU Z GPU DO CPU
-    HIP_CHECK_VOID(hipDeviceSynchronize());
-    
-    if (host_output_buffer != nullptr) {
-        HIP_CHECK_VOID(hipMemcpy(host_output_buffer, d_output, output_buffer_size, hipMemcpyDeviceToHost));
-        std::cout << "[HIP] Pomyślnie skopiowano gotowy obraz z VRAM do RAM.\n";
-        // --- TESTOWE WYMUSZENIE KOLORU (DOPISZ TO) ---
-        // for (int i = 0; i < width * height * 3; i += 3) {
-        //     host_output_buffer[i]     = 1.0f; // Czerwony
-        //     host_output_buffer[i + 1] = 0.5f; // Zielony
-        //     host_output_buffer[i + 2] = 0.5f; // Niebieski
-        // }
-        // ----------------------------------------------
+    // 6. SYNCHRONIZACJA I WYŁAPYWANIE CRASHY KERNELA
+    hipError_t sync_stat = hipDeviceSynchronize();
+    if (sync_stat != hipSuccess) {
+        std::cerr << "\n[HIP BŁĄD KRYTYCZNY] Kernel wywrócił się w trakcie działania na GPU!\n";
+        std::cerr << "Powód: " << hipGetErrorString(sync_stat) << "\n\n";
+    } else {
+        std::cout << "[HIP] Kernel zakończył pracę poprawnie (0 crashy!).\n";
     }
 
-    // 7. SPRZĄTANIE VRAM
-    HIP_CHECK_VOID(hipFree(d_shaderglobals));
-    if (d_groupdata) HIP_CHECK_VOID(hipFree(d_groupdata));
-    HIP_CHECK_VOID(hipFree(d_output));
+    // 7. KOPIOWANIE WYNIKU DO RAM
+    HIP_CHECK_VOID(hipMemcpy(host_output_buffer, d_output, width * height * 3 * sizeof(float), hipMemcpyDeviceToHost));
+
+    // 8. RADAR NA BUFOR WYJŚCIOWY (Zamiast groupdata)
+    std::cout << "[DEBUG] Skanowanie docelowego bufora pikseli (d_output -> host_output_buffer)...\n";
+    bool found_pixel = false;
+    for(int i = 0; i < 20; i++) { // sprawdzamy pierwsze 20 kanałów (np. 5 pikseli RGBA)
+        if (std::abs(host_output_buffer[i]) > 0.0001f) {
+            std::cout << "  -> Znaleziono wartość " << host_output_buffer[i] 
+                      << " w głównym wyjściu pod indeksem [" << i << "]\n";
+            found_pixel = true;
+        }
+    }
+    if (!found_pixel) {
+        std::cout << "  [!] Główny bufor wyjściowy też jest pusty.\n";
+    }
 }

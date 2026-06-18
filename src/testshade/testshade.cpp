@@ -1709,8 +1709,22 @@ shade_region(SimpleRenderer* rend, ShaderGroup* shadergroup, OIIO::ROI roi,
             // 3. Weryfikacja i ostateczny Render HIP na GPU AMD
             if (artifact_loaded) {
                 int groupdata_size = 0;
-                shadingsys->getattribute(shadergroup, "llvm_groupdata_size", TypeDesc::INT, &groupdata_size); // Bez .get()
+                
+                // 1. Próbujemy pobrać wariant LLVM
+                bool success = shadingsys->getattribute(shadergroup, "llvm_groupdata_size", TypeDesc::INT, &groupdata_size);
+                
+                // 2. Jeśli się nie udało, próbujemy standardowego wariantu
+                if (!success) {
+                    success = shadingsys->getattribute(shadergroup, "groupdata_size", TypeDesc::INT, &groupdata_size);
+                }
 
+                // 3. Weryfikacja i PLAN AWARYJNY (Fallback)
+                if (!success || groupdata_size <= 0) {
+                    std::cerr << "[OSTRZEŻENIE] OSL nie zwrócił rozmiaru groupdata! Wymuszam rozmiar awaryjny (1024 bajty).\n";
+                    groupdata_size = 1024; 
+                } else {
+                    std::cout << "[OSL] Sukces! Pobrano groupdata_size = " << groupdata_size << " bajtów na piksel.\n";
+                }
                 float* host_pixel_buffer = nullptr;
                 if (OIIO::ImageBuf* outputimg = rend->outputbuf(0)) {
                     host_pixel_buffer = (float*)outputimg->localpixels();
