@@ -29,7 +29,7 @@
 #define DECL(name, signature) extern "C" void name();
 #include "builtindecl.h"
 #undef DECL
-
+#include "llvm/Transforms/Utils/Cloning.h"
 
 /*
 This whole file is concerned with taking our post-optimized OSO
@@ -2082,6 +2082,7 @@ empty_group_func(void*, void*)
 void
 BackendLLVM::run()
 {
+std::cout<<"[DEBUG] jestem w run..";
     if (group().does_nothing()) {
         group().llvm_compiled_init((RunLLVMGroupFunc)empty_group_func);
         group().llvm_compiled_version((RunLLVMGroupFunc)empty_group_func);
@@ -2092,6 +2093,7 @@ BackendLLVM::run()
     // of ShadingSystemImpl::optimize_group.
     OIIO::Timer timer;
     std::string err;
+std::unique_ptr<llvm::Module> amd_module_clone;
 
     {
 #ifdef OSL_LLVM_NO_BITCODE
@@ -2273,6 +2275,13 @@ BackendLLVM::run()
         }
         OSL_ASSERT(ll.module());
 #endif
+// NEWNEW - KB ------------------------------
+if (!shadingsys().amdgpu_architecture().empty()) {
+    amd_module_clone = llvm::CloneModule(*ll.module());
+    std::cout << "[AMD] Sklonowano moduł IR (" 
+              << amd_module_clone->size() << " funkcji) dla backendu AMDGPU.\n";
+}
+//-------------------------------
 
         // Create the ExecutionEngine. We don't create an ExecutionEngine in the
         // OptiX case, because we are using the NVPTX backend and not MCJIT. However,
@@ -2379,12 +2388,20 @@ BackendLLVM::run()
                 // If we plan to call bitcode_string of a layer's function after
                 // optimization it may not exist after optimization unless we
                 // treat it as external.
-                if (f && (group().is_entry_layer(layer) || llvm_debug() || shadingsys().use_amdgpu())) {
+                if (f && (group().is_entry_layer(layer) || llvm_debug())) {
                     external_functions.insert(f);
                 }
             }
         }
+        // NEWNEW - KB
+        for (llvm::Function& fn : *ll.module()) {
+            if (fn.getName().contains("osl_exec_")) {
+                external_functions.insert(&fn);
+            }
+        }
+        std::cout<<"Przed prune...";
         ll.prune_and_internalize_module(external_functions);
+        std::cout<<"Po prune..";
     }
 
     // Debug code to dump the pre-optimized bitcode to a file
@@ -2432,7 +2449,9 @@ BackendLLVM::run()
 
     // Optimize the LLVM IR unless it's a do-nothing group.
     if (!group().does_nothing()) {
+        std::cout << "[DEBUG] Przed do_optimize..." << std::flush;
         ll.do_optimize();
+        std::cout << "[DEBUG] Po do_optimize." << std::flush;
     }
 
 #if OSL_USE_OPTIX
@@ -2490,7 +2509,24 @@ BackendLLVM::run()
             shadingsys().errorfmt("Could not write to '{}'", name);
         }
     }
-
+    // NEWNEW - KB ----------------------
+    if (amd_module_clone) {
+    std::cout << "[AMD] Uruchamiam kompilację AMDGPU z sklonowanego modułu...\n";
+    std::vector<uint8_t> elf = get_llvm_bitcode(amd_module_clone.get());
+    if (!elf.empty()) {
+        std::string arch = shadingsys().amdgpu_architecture().string();
+        group().m_compiled_gpu_artifacts.push_back(
+            CompiledGPUArtifact(elf, arch, "amdgpu_elf", OSL_LLVM_VERSION)
+        );
+        std::cout << "[AMD] Artefakt ELF gotowy: " << elf.size() << " bajtów.\n";
+    } else {
+        std::cerr << "[AMD] BŁĄD: get_llvm_bitcode zwróciło pusty wynik!\n";
+    }
+}
+    
+   // [AMD] Stary blok z clangiem usunięty - get_llvm_bitcode() już emituje gotowy ELF.
+    // Artefakt jest generowany przez amd_module_clone powyżej.
+    // ==========================================================
 #if OSL_USE_OPTIX
     if (use_optix()) {
         ll.ptx_compile_group(nullptr, group().name().string(),
@@ -2500,24 +2536,8 @@ BackendLLVM::run()
         }
     } else
 #endif
-// NEW - KB (ZAMIAST OLEK)
-#if OSL_ENABLE_AMDGPU
-    if (shadingsys().use_amdgpu()) {
-        // 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
-        // (Wywołujemy bez 'll.'!)
-        std::vector<uint8_t> bitcode = get_llvm_bitcode(init_func->getParent());
-        
-        if (bitcode.empty()) {
-            OSL_ASSERT(0 && "Unable to generate AMDGPU Bitcode");
-        } else {
-            // 2. Pakujemy gotowe bajty w nasz nowy Artefakt i dodajemy do wektora Kacpra
-            group().m_compiled_gpu_artifacts.push_back(
-            CompiledGPUArtifact(bitcode, shadingsys().amdgpu_architecture().string(), "llvm_bitcode", OSL_LLVM_VERSION)            );
-        }
-    } else
-#endif
-// END NEW
-    {
+{
+
         // Force the JIT to happen now and retrieve the JITed function pointers
         // for the initialization and all public entry points.
         group().llvm_compiled_init(

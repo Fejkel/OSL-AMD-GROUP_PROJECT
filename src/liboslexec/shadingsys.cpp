@@ -4001,40 +4001,10 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         }
 
         if (!cached) {
-            // NEWNEW - KB
-            // Sprawdzamy, czy użytkownik zażądał kompilacji na AMDGPU
-            if (use_amdgpu_cache() || !m_amdgpu_architecture.string().empty()) {
-                
-                // 1. Tworzymy instancję backendu LLVM
-                BackendLLVM lljitter(*this, group, ctx);
-                
-                std::cout << "[DEBUG] Backend utworzony. Wywołuję run()...\n";
-
-                // 2. Czy lljitter wymaga jawnego uruchomienia? Spróbuj odkomentować/dodać:
-                lljitter.run(); 
-
-                // 3. Teraz pobierz bitcode
-                std::vector<uint8_t> amd_elf = lljitter.get_llvm_bitcode();
-
-                std::cout << "[DEBUG] Rozmiar pobranego bitkodu: " << amd_elf.size() << " bajtów.\n"; 
-                                
-                if (amd_elf.empty()) {
-                    error(OIIO::Strutil::format("Blad: Kompilacja do AMDGPU ELF dla grupy %s nie powiodla sie!", group.name().c_str()));
-                } else {
-                    // 3. Zapisujemy wygenerowane artefakty w grupie shaderów
-                    // Zakładam, że macie w klasie ShaderGroup pole na binaria AMD, np. m_amdgpu_elf
-                    group.m_amdgpu_elf = amd_elf; 
-                    
-                    // NEWNEW - KB 
-                    register_amdgpu_artifact_in_registry(&group, amd_elf);
-                    
-                    info(OIIO::Strutil::format("Sukces: Wygenerowano i zaladowano AMDGPU ELF dla %s", group.name().c_str()));
-                }
-                 
-                // Ustawiamy flagę, że grupa została przetworzona, aby uniknąć standardowego czyszczenia CPU
-                group.m_jitted = true; 
-
-            } else {
+            // [AMD+CPU] Uruchamiamy standardowy backend LLVM.
+            // Dla backendu AMD artefakt ELF jest generowany wewnątrz run()
+            // przez amd_module_clone + get_llvm_bitcode().
+            {
             BackendLLVM lljitter(*this, group, ctx);
             lljitter.run();
 

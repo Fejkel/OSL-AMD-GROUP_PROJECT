@@ -9,6 +9,8 @@ struct GPUShaderModuleDesc {
     std::string format;
     const void* data_ptr;
     size_t data_size;
+    std::string kernel_name;  // <-- DODAJ TO
+
 };
 
 // Abstrakcyjna klasa bazowa
@@ -18,5 +20,5 @@ public:
 
     virtual bool init() = 0;
     virtual bool load_shader(const GPUShaderModuleDesc& desc) = 0;
-    virtual void render(int width, int height) = 0;
+    virtual void render(int width, int height, int groupdata_size, float* host_output_buffer) = 0;
 };

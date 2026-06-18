@@ -1613,6 +1613,126 @@ shade_region(SimpleRenderer* rend, ShaderGroup* shadergroup, OIIO::ROI roi,
 
     raytype_bit = shadingsys->raytype_bit(ustring(raytype_name));
 
+    if (!amdgpu_arch.empty()) {
+        
+        // Zabezpieczenie przed wielowątkowym chaosem testshade
+        // Gwarantuje, że ten kod GPU wykona się TYLKO RAZ dla całego obrazka
+        static std::atomic<bool> gpu_already_run{false};
+        
+        if (!gpu_already_run.exchange(true)) {
+            
+            // --- WYMUSZENIE KOMPILACJI JIT (Zanim poszukamy artefaktów!) ---
+            std::cout << "[Testshade] Wymuszanie kompilacji JIT pod architekturę AMD...\n";
+            shadingsys->optimize_group(shadergroup, raytype_bit, ~raytype_bit, ctx);
+            // ---------------------------------------------------------------
+            
+            // 1. Inicjalizacja polimorficznego renderera
+            std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
+            gpu_renderer->init();
+
+            bool artifact_loaded = false;
+            auto* group_ptr = shadergroup; // <--- Używamy poprawionej wersji bez .get()
+            
+            // 2a. Ścieżka NATANA (Atrybuty OSL)
+            int num_artifacts = 0;
+            if (shadingsys->getattribute(group_ptr, "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
+                for (int i = 0; i < num_artifacts; ++i) {
+                    const void* data_ptr = nullptr;
+                    size_t artifact_size = 0;
+                    int artifact_size_int = 0;
+
+                    std::string attr_data = "gpu_artifact:" + std::to_string(i) + ":data";
+                    std::string attr_size = "gpu_artifact:" + std::to_string(i) + ":size";
+
+                    bool has_data = shadingsys->getattribute(group_ptr, attr_data, TypeDesc::PTR, &data_ptr);
+                    
+                    bool has_size = shadingsys->getattribute(group_ptr, attr_size, TypeDesc::INT, &artifact_size_int);
+                    if (has_size) {
+                        artifact_size = artifact_size_int;
+                    } else {
+                        int64_t sz64 = 0;
+                        shadingsys->getattribute(group_ptr, attr_size, TypeDesc::INT64, &sz64);
+                        artifact_size = sz64;
+                    }
+
+                    if (has_data && has_size) {
+                        GPUShaderModuleDesc desc;
+                        desc.architecture = amdgpu_arch;
+                        desc.format = "hsaco";
+                        desc.data_ptr = data_ptr;
+                        desc.data_size = artifact_size;
+                        desc.kernel_name = "osl_kernel"; 
+
+                        gpu_renderer->load_shader(desc);
+                        artifact_loaded = true;
+
+                        if (save_amdgpu) {
+                            std::string out_filename = "shader_" + amdgpu_arch + ".hsaco";
+                            std::ofstream outfile(out_filename, std::ios::binary);
+                            if (outfile.is_open()) {
+                                outfile.write((const char*)data_ptr, artifact_size);
+                                std::cout << "[Testshade] Zapisano natywny artefakt na dysk: " << out_filename << "\n";
+                            }
+                        }
+                    }
+                }
+            } 
+            
+            // 2b. Ścieżka KB (Globalny Rejestr) - Fallback
+            if (!artifact_loaded) {
+                size_t artifact_size = 0;
+                if (OSL_get_amdgpu_artifact(group_ptr, nullptr, &artifact_size) && artifact_size > 0) {
+                    std::vector<uint8_t> local_elf_buffer(artifact_size);
+                    OSL_get_amdgpu_artifact(group_ptr, local_elf_buffer.data(), &artifact_size);
+
+                    GPUShaderModuleDesc desc;
+                    desc.architecture = amdgpu_arch;            
+                    desc.format = "amdgpu_elf";                 
+                    desc.data_ptr = local_elf_buffer.data();
+                    desc.data_size = artifact_size;
+                    desc.kernel_name = "osl_exec_" + groupname;
+
+                    gpu_renderer->load_shader(desc);
+                    artifact_loaded = true;
+
+                    if (save_amdgpu) {
+                        std::string out_filename = "shader_" + amdgpu_arch + ".o";
+                        std::ofstream outfile(out_filename, std::ios::binary);
+                        if (outfile.is_open()) {
+                            outfile.write((const char*)local_elf_buffer.data(), artifact_size);
+                            std::cout << "[Testshade] Zapisano artefakt maszynowy AMD na dysk: " << out_filename << "\n";
+                        }
+                    }
+                }
+            }
+
+            // 3. Weryfikacja i ostateczny Render HIP na GPU AMD
+            if (artifact_loaded) {
+                int groupdata_size = 0;
+                shadingsys->getattribute(shadergroup, "llvm_groupdata_size", TypeDesc::INT, &groupdata_size); // Bez .get()
+
+                float* host_pixel_buffer = nullptr;
+                if (OIIO::ImageBuf* outputimg = rend->outputbuf(0)) {
+                    host_pixel_buffer = (float*)outputimg->localpixels();
+                }
+
+                std::cout << "[HIP] Rozpoczęcie renderowania sprzętowego. Rozdzielczość: " << xres << "x" << yres << "\n";
+                
+                // Render na GPU
+                gpu_renderer->render(xres, yres, groupdata_size, host_pixel_buffer);
+                
+                // Zapis wygenerowanego obrazka po wykonaniu na GPU
+                if (save && (print_outputs || !output_placement)) {
+                    save_outputs(rend, shadingsys, ctx, 0, 0); 
+                }
+            } else {
+                // Jeśli OSL nie wypluł nam kodu AMD, zgłaszamy to i NIE odpalamy render()
+                std::cerr << "\n[HIP - BŁĄD KRYTYCZNY] OSL nie przekazał kodu AMDGPU dla grupy: " << group_ptr << "\n";
+                std::cerr << "Prawdopodobnie JIT nie wygenerował kodu karty graficznej.\n";
+            }
+        }
+
+    } else {
     // Loop over all pixels in the image (in x and y)...
     for (int y = roi.ybegin; y < roi.yend; ++y) {
         int shadeindex = y * xres + roi.xbegin;
@@ -1675,6 +1795,7 @@ shade_region(SimpleRenderer* rend, ShaderGroup* shadergroup, OIIO::ROI roi,
             if (save && (print_outputs || !output_placement))
                 save_outputs(rend, shadingsys, ctx, x, y);
         }
+    }
     }
 
     // We're done shading with this context.
@@ -2291,95 +2412,6 @@ test_shade(int argc, const char* argv[])
 
     double runtime = timer.lap();
 
-// NEWNEW - KB --> - NATAN & KB (Integracja Ścieżki AMDGPU)
-if (!amdgpu_arch.empty()) {
-    
-    // 1. Inicjalizacja polimorficznego renderera Natana (tylko raz!)
-    std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
-    gpu_renderer->init();
-
-    bool artifact_loaded = false;
-    auto* group_ptr = shadergroup.get();
-    
-    // 2a. Ścieżka NATANA (Atrybuty OSL)
-    int num_artifacts = 0;
-    if (shadingsys->getattribute(group_ptr, "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
-        for (int i = 0; i < num_artifacts; ++i) {
-            const void* data_ptr = nullptr;
-            size_t artifact_size = 0;
-            int artifact_size_int = 0;
-
-            std::string attr_data = "gpu_artifact:" + std::to_string(i) + ":data";
-            std::string attr_size = "gpu_artifact:" + std::to_string(i) + ":size";
-
-            bool has_data = shadingsys->getattribute(group_ptr, attr_data, TypeDesc::PTR, &data_ptr);
-            
-            bool has_size = shadingsys->getattribute(group_ptr, attr_size, TypeDesc::INT, &artifact_size_int);
-            if (has_size) {
-                artifact_size = artifact_size_int;
-            } else {
-                int64_t sz64 = 0;
-                has_size = shadingsys->getattribute(group_ptr, attr_size, TypeDesc::INT64, &sz64);
-                artifact_size = sz64;
-            }
-
-            if (has_data && has_size) {
-                GPUShaderModuleDesc desc;
-                desc.architecture = amdgpu_arch;
-                desc.format = "hsaco";
-                desc.data_ptr = data_ptr;
-                desc.data_size = artifact_size;
-
-                gpu_renderer->load_shader(desc);
-                artifact_loaded = true;
-
-                if (save_amdgpu) {
-                    std::string out_filename = "shader_" + amdgpu_arch + ".hsaco";
-                    std::ofstream outfile(out_filename, std::ios::binary);
-                    if (outfile.is_open()) {
-                        outfile.write((const char*)data_ptr, artifact_size);
-                        std::cout << "[Testshade] Zapisano natywny artefakt na dysk: " << out_filename << "\n";
-                    }
-                }
-            }
-        }
-    } 
-    
-    // 2b. Ścieżka KB (Globalny Rejestr) - Fallback, jeśli atrybuty zawiodą
-    if (!artifact_loaded) {
-        size_t artifact_size = 0;
-        if (OSL_get_amdgpu_artifact(group_ptr, nullptr, &artifact_size) && artifact_size > 0) {
-            std::vector<uint8_t> local_elf_buffer(artifact_size);
-            OSL_get_amdgpu_artifact(group_ptr, local_elf_buffer.data(), &artifact_size);
-
-            GPUShaderModuleDesc desc;
-            desc.architecture = amdgpu_arch;            
-            desc.format = "amdgpu_elf";                 
-            desc.data_ptr = local_elf_buffer.data();
-            desc.data_size = artifact_size;
-
-            gpu_renderer->load_shader(desc);
-            artifact_loaded = true;
-
-            if (save_amdgpu) {
-                std::string out_filename = "shader_" + amdgpu_arch + ".o";
-                std::ofstream outfile(out_filename, std::ios::binary);
-                if (outfile.is_open()) {
-                    outfile.write((const char*)local_elf_buffer.data(), artifact_size);
-                    std::cout << "[Testshade] Zapisano artefakt maszynowy AMD na dysk: " << out_filename << "\n";
-                }
-            }
-        }
-    }
-
-    // 3. Weryfikacja i ostateczny Render HIP na GPU AMD
-    if (!artifact_loaded) {
-        std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem Registry for group: " << group_ptr << "\n";
-    }
-
-    std::cout << "[HIP] Rozpoczęcie renderowania sprzętowego. Rozdzielczość: " << xres << "x" << yres << "\n";
-    gpu_renderer->render(xres, yres); 
-}
 
     // This awkward condition preserves an output oddity from long ago,
     // eliminating the need to update hundreds of ref outputs.

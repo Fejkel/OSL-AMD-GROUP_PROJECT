@@ -1069,7 +1069,39 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
     // Konfiguracja wybranego modułu pod AMD
     mod->setDataLayout(target_machine->createDataLayout());
     mod->setTargetTriple("amdgcn-amd-amdhsa");
+    // NEWNEW - KB ------------------
+    std::vector<llvm::Function*> to_remove;
+    llvm::Function* best_kernel = nullptr;
+    int max_instructions = 0;
 
+    for (llvm::Function& F : *mod) {
+        if (!F.isDeclaration()) {
+            std::string fname = F.getName().str();
+            if (fname.find("group") != std::string::npos || 
+                fname.find("exec")  != std::string::npos || 
+                fname.find("layer") != std::string::npos) {
+                int count = F.getInstructionCount();
+                std::cout << "[AMD] Funkcja: " << fname << " (" << count << " instrukcji)\n";
+                if (count > max_instructions) {
+                    max_instructions = count;
+                    best_kernel = &F;
+                }
+            }
+        }
+    }
+
+    if (best_kernel) {
+        std::cout << "[AMD] Wybieram kernel: " << best_kernel->getName().str() << "\n";
+        best_kernel->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+        best_kernel->setLinkage(llvm::GlobalValue::ExternalLinkage);
+        best_kernel->setName("osl_kernel");
+    }
+    for (llvm::Function* fn : to_remove) {
+        fn->deleteBody();  // Usuń ciało, zostaw deklarację (bezpieczne)
+    }
+    std::cout << "[AMD] Usunięto " << to_remove.size() 
+              << " niepotrzebnych funkcji z modułu AMD.\n";
+//-----------------------------
     // REJESTRACJA KERNELA DLA NATANA:
     shadingsys().info("[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---");
     for (llvm::Function &F : *mod) {

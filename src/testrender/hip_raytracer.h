@@ -12,7 +12,9 @@ public:
 
     bool init() override;
     bool load_shader(const GPUShaderModuleDesc& desc) override;
-    void render(int width, int height) override;
+    void render(int width, int height, int groupdata_size, float* host_output_buffer) override;
+    std::string m_kernel_name;
+
 
 private:
     // Zmienna przechowująca skompilowany kod na karcie graficznej
