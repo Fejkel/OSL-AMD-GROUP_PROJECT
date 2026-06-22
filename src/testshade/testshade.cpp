@@ -1623,6 +1623,9 @@ shade_region(SimpleRenderer* rend, ShaderGroup* shadergroup, OIIO::ROI roi,
             
             // --- WYMUSZENIE KOMPILACJI JIT (Zanim poszukamy artefaktów!) ---
             std::cout << "[Testshade] Wymuszanie kompilacji JIT pod architekturę AMD...\n";
+            // === OTO NASZ BRAKUJĄCY ŁĄCZNIK! ===
+    
+
             shadingsys->optimize_group(shadergroup, raytype_bit, ~raytype_bit, ctx);
             // ---------------------------------------------------------------
             
@@ -2134,6 +2137,8 @@ test_shade(int argc, const char* argv[])
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
     //NEW - Ka
     // Configure AMDGPU target architecture if requested via CLI.
+    int enable_amdgpu = 1;
+    shadingsys->attribute("amdgpu", enable_amdgpu);
     if (!amdgpu_arch.empty()) {
         shadingsys->attribute("amdgpu_architecture", amdgpu_arch);
         if (verbose)
