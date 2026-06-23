@@ -2378,6 +2378,17 @@ if (!amdgpu_arch.empty()) {
     }
 
     std::cout << "[HIP] Rozpoczęcie renderowania sprzętowego. Rozdzielczość: " << xres << "x" << yres << "\n";
+
+    // --- ŁĄCZYMY GPU Z PAMIĘCIĄ RAM TESTSHADE ---
+    if (OIIO::ImageBuf* main_img = rend->outputbuf(0)) {
+        // Rzutujemy bazowy wskaźnik na naszą klasę, by odsłonić "boczne drzwi"
+        auto* hip_renderer = static_cast<HipRaytracer*>(gpu_renderer.get());
+        hip_renderer->set_host_buffer((float*)main_img->localpixels());
+    } else {
+        std::cerr << "[HIP] OSTRZEZENIE: Nie udalo sie pobrac glownego bufora obrazu (Cout)!\n";
+    }
+    // ---------------------------------------------
+
     gpu_renderer->render(xres, yres); 
 }
 

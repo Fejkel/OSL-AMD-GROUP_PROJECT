@@ -7,6 +7,8 @@
 #include <hip/hip_runtime.h>
 #include <cstring>
 #include <OpenImageIO/imageio.h>
+#include <OSL/oslexec.h>
+#include <cstring>
 
 // Makro do wygodnego sprawdzania, czy funkcje HIP nie zwracają błędów
 #define HIP_CHECK(command) \
@@ -127,98 +129,207 @@ bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
 // 3. Uruchomienie kernela renderującego na GPU
 // -------------------------------------------------------------------------
 void HipRaytracer::render(int width, int height) {
+
     std::cout << "[HIP] Rozpoczęcie renderowania. Rozdzielczość: " 
+
               << width << "x" << height << "\n";
+
     
+
     if (!m_kernel) {
+
         std::cerr << "[Błąd HIP] Kernel nie jest załadowany! Przerywam renderowanie.\n";
+
         return;
+
     }
+
              
+
     // 1. Alokacja pamięci dla obrazka wyjściowego (Teraz float x3 (RGB), zgodnie z nowym LLVM)
+
     size_t buffer_size = width * height * 3 * sizeof(float);
+
     hipDeviceptr_t d_output;
+
     HIP_CHECK_VOID(hipMalloc((void**)&d_output, buffer_size));
 
+
+
     // 2. Alokacja zerowych ShaderGlobals na GPU (aby OSL nie scrashował gdy do nich sięgnie)
+
     size_t sg_size = width * height * 256; 
+
     void* d_shaderglobals = nullptr;
+
     HIP_CHECK_VOID(hipMalloc(&d_shaderglobals, sg_size));
+
     HIP_CHECK_VOID(hipMemset(d_shaderglobals, 0, sg_size));
 
+
+
     // 3. Skonfigurowanie bloków i siatki (Grid) wątków
+
     dim3 blockSize(16, 16);
+
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x,
+
                   (height + blockSize.y - 1) / blockSize.y);
 
+
+
     // 4. PRZYGOTOWANIE ARGUMENTÓW ZGODNYCH Z NOWYM WRAPPEREM LLVM (7 sztuk)
+
     void* d_groupdata = nullptr;
+
     void* userdata_base_ptr = nullptr;
+
     int shadeindex = 0;
+
     void* interactive_params_ptr = nullptr;
 
+
+
     void* args[] = {
+
         &d_shaderglobals,        // 1. ShaderGlobals*
+
         &d_groupdata,            // 2. void* groupdata
+
         &userdata_base_ptr,      // 3. void* userdata
+
         &d_output,               // 4. void* output_base
+
         &shadeindex,             // 5. int shadeindex
+
         &interactive_params_ptr, // 6. void* interactive_params
+
         &width                   // 7. int width
+
     };
 
+
+
     // 5. Uruchomienie kernela
+
     HIP_CHECK_VOID(hipModuleLaunchKernel(
+
         m_kernel,
+
         gridSize.x, gridSize.y, gridSize.z,
+
         blockSize.x, blockSize.y, blockSize.z,
+
         0, 0, // Pamięć współdzielona i strumień domyślny
+
         args, nullptr
+
     ));
 
+
+
     // 6. Czekamy aż karta skończy renderować
+
     HIP_CHECK_VOID(hipDeviceSynchronize());
+
     std::cout << "[HIP] Kernel zakończył pracę.\n";
 
-    // --- NOWY KROK: POBRANIE WYNIKÓW Z VRAM NA CPU ---
-    std::cout << "[HIP] Kopiowanie wyrenderowanego obrazu do pamięci RAM...\n";
-    std::vector<float> h_output(width * height * 3, 0.0f); // Wektor na dane na CPU
     
-    HIP_CHECK_VOID(hipMemcpy(h_output.data(), (void*)d_output, buffer_size, hipMemcpyDeviceToHost));
+
+    if (m_host_buffer != nullptr) {
+
+    std::cout << "[HIP] Kopiowanie wyrenderowanego obrazu prosto do pamieci RAM hosta...\n";
+
+    HIP_CHECK_VOID(hipMemcpy(m_host_buffer, (void*)d_output, buffer_size, hipMemcpyDeviceToHost));
+
+} else {
+
+    std::cerr << "[HIP] OSTRZEZENIE: m_host_buffer jest pusty! Wyniki znikna w prozni.\n";
+
+}
+
+
+
+    // --- NOWY KROK: POBRANIE WYNIKÓW Z VRAM NA CPU ---
+
+    std::cout << "[HIP] Kopiowanie wyrenderowanego obrazu do pamięci RAM...\n";
+
+    std::vector<float> h_output(width * height * 3, 0.0f); // Wektor na dane na CPU
+
+    
+
+HIP_CHECK_VOID(hipMemcpy(h_output.data(), (void*)d_output, buffer_size, hipMemcpyDeviceToHost));
+    
 
     // Wypiszmy wartość pierwszego wyrenderowanego piksela w lewym górnym rogu
+
     std::cout << "\n=== [WYNIKI RENDEROWANIA] ===\n";
+
     std::cout << "Piksel [0,0] RGB: (" 
+
               << h_output[0] << ", " 
+
               << h_output[1] << ", " 
+
               << h_output[2] << ")\n";
 
+
+
     // Wypiszmy wartość piksela ze środka ekranu
+
     int mid_x = width / 2;
+
     int mid_y = height / 2;
+
     int mid_idx = (mid_y * width + mid_x) * 3;
+
     
+
     std::cout << "Piksel [" << mid_x << "," << mid_y << "] RGB: (" 
+
               << h_output[mid_idx] << ", " 
+
               << h_output[mid_idx + 1] << ", " 
+
               << h_output[mid_idx + 2] << ")\n";
+
     std::cout << "=============================\n\n";
 
+
+
     // --- WYMUSZONY ZAPIS OBRAZU NA DYSK PRZEZ OIIO ---
+
     std::string custom_output = "sukces_hip.png";
+
     auto out_file = OIIO::ImageOutput::create(custom_output);
+
     if (out_file) {
+
         // Definiujemy strukturę obrazu: szerokość, wysokość, 3 kanały (RGB), typ float
+
         OIIO::ImageSpec spec(width, height, 3, OIIO::TypeDesc::FLOAT);
+
         out_file->open(custom_output, spec);
+
         out_file->write_image(OIIO::TypeDesc::FLOAT, h_output.data());
+
         out_file->close();
+
         std::cout << "[HIP SUCCESS] Obraz został pomyślnie zapisany w: " << custom_output << "\n";
+
     } else {
+
         std::cerr << "[BŁĄD HIP] OIIO nie mogło utworzyć pliku: " << custom_output << "\n";
+
     }
 
+
+
     // 7. Sprzątanie VRAM
+
     HIP_CHECK_VOID(hipFree((void*)d_output));
+
     HIP_CHECK_VOID(hipFree(d_shaderglobals));
-}
+
+} 
+
