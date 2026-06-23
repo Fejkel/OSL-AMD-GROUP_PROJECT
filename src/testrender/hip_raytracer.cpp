@@ -205,7 +205,7 @@ void HipRaytracer::render(int width, int height) {
     std::cout << "=============================\n\n";
 
     // --- WYMUSZONY ZAPIS OBRAZU NA DYSK PRZEZ OIIO ---
-    std::string custom_output = "wynik1.png";
+    std::string custom_output = "sukces_hip.png";
     auto out_file = OIIO::ImageOutput::create(custom_output);
     if (out_file) {
         // Definiujemy strukturę obrazu: szerokość, wysokość, 3 kanały (RGB), typ float
