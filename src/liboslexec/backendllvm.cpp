@@ -1074,27 +1074,56 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
     mod->setTargetTriple("amdgcn-amd-amdhsa");
 
     // [DODAJ TO] Wymuszenie wygenerowania HSA Kernel Descriptors przez LLVM (Kluczowe dla ROCm!)
-    mod->addModuleFlag(llvm::Module::Warning, "amdgpu_code_object_version", 5);
+//    mod->addModuleFlag(llvm::Module::Error, "amdgpu_code_object_version", 4);
 
-    // 5. LOKALIZACJA GŁÓWNEJ FUNKCJI WYKONAWCZEJ OSL (_exec)
+// ==================== TYMCZASOWY DEBUG AMD ====================
+std::cout << "\n[AMD DEBUG] === ROZPOCZĘCIE ZRZUTU FUNKCJI W MODULE ===\n";
+std::cout << "[AMD DEBUG] Nazwa modułu: " << (mod->getModuleIdentifier()) << "\n";
+int func_counter = 0;
+for (llvm::Function& F : *mod) {
+    func_counter++;
+    std::cout << "  [" << func_counter << "] Nazwa: " << F.getName().str()
+              << " | Deklaracja: " << (F.isDeclaration() ? "TAK" : "NIE");
+    if (!F.isDeclaration()) {
+        std::cout << " | Instrukcji: " << F.getInstructionCount();
+    }
+    std::cout << "\n";
+}
+std::cout << "[AMD DEBUG] === KONIEC ZRZUTU (Razem funkcji: " << func_counter << ") ===\n\n";
+// ==============================================================
+
+    // 5. GENEROWANIE GŁÓWNEJ FUNKCJI WYKONAWCZEJ OSL (Megakernel dla GPU)
+    shadingsys().info("[LLVM AMDGPU] Budowanie głównego Megakernela GPU (group_exec)...");
+    // 5. LOKALIZACJA FUNKCJI INICJALIZACYJNEJ LUB WARSTWY (Bezpieczny Fallback)
     llvm::Function* orig_func = nullptr;
+    
+    // Najpierw szukamy funkcji inicjalizującej grupę, bo to tam OSL wrzuca stałe (np. Twój kolor!)
     for (llvm::Function &F : *mod) {
-        if (!F.isDeclaration()) {
-            std::string fname = F.getName().str();
-            if (fname.find("_exec") != std::string::npos || 
-               (fname.find("group") != std::string::npos && fname.find("exec") != std::string::npos)) {
-                orig_func = &F;
-                break; 
+        if (!F.isDeclaration() && F.getName().str().find("osl_init_group") != std::string::npos) {
+            orig_func = &F;
+            break;
+        }
+    }
+
+    // Jeśli nie ma init_group, szukamy jakiejkolwiek niepustej funkcji wykonawczej
+    if (!orig_func) {
+        for (llvm::Function &F : *mod) {
+            if (!F.isDeclaration() && !F.empty()) {
+                std::string fname = F.getName().str();
+                if (fname.find("group") != std::string::npos || fname.find("exec") != std::string::npos) {
+                    orig_func = &F;
+                    break;
+                }
             }
         }
     }
 
     if (!orig_func) {
-        shadingsys().error("[LLVM AMDGPU] BLAD! Nie znaleziono wewnętrznej funkcji wykonawczej OSL do owrapowania!");
+        shadingsys().error("[LLVM AMDGPU] BLAD! Nie znaleziono zadnej aktywnej funkcji OSL do owrapowania!");
         return std::vector<uint8_t>();
     }
 
-    shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Znaleziono funkcję OSL: %s. Rozpoczynam budowanie Launchera...", orig_func->getName().str()));
+    shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Wybrana do owrapowania funkcja OSL: %s", orig_func->getName().str()));
 
     // 6. DYNAMICZNA BUDOWA WRAPPERA (LAUNCHER KERNEL) O NAZWIE "osl_kernel"
     llvm::LLVMContext &ctx = mod->getContext();
@@ -1182,6 +1211,21 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
 
     shadingsys().info("[LLVM AMDGPU] ---> Tożsamość modułu zmieniona na AMDGPU. Wrapper ustawiony jako KERNEL.");
 
+    // =========================================================================
+    // DIAGNOZA MODUŁU LLVM - SPRAWDZAMY, CZY FUNKCJE MAJĄ CIAŁA!
+    // =========================================================================
+    llvm::errs() << "\n[!!! DIAGNOZA LLVM !!!]\n";
+    llvm::errs() << "Liczba wszystkich funkcji w module: " << mod->getFunctionList().size() << "\n";
+    
+    for (llvm::Function &F : *mod) {
+        // Wypisujemy tylko interesujące nas funkcje (nasz kernel i oryginalny kod shadera)
+        if (F.getName() == "osl_kernel" || F.getName().contains("group_") || F.getName().contains("shader")) {
+            llvm::errs() << " -> Funkcja: " << F.getName() 
+                         << " | Czy jest pusta (tylko deklaracja)? " << (F.empty() ? "TAK (Brak kodu!)" : "NIE (Ma kod!)") << "\n";
+        }
+    }
+    llvm::errs() << "[!!! KONIEC DIAGNOZY !!!]\n\n";
+    // =========================================================================
     // =========================================================================
     // 8.6 ZRZUT WYGENEROWANEGO KODU IR DO PLIKU (NASZ ŚWIADEK KORONNY)
     // =========================================================================

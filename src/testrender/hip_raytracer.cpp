@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <hip/hip_runtime.h>
 #include <cstring>
+#include <OpenImageIO/imageio.h>
 
 // Makro do wygodnego sprawdzania, czy funkcje HIP nie zwracają błędów
 #define HIP_CHECK(command) \
@@ -178,6 +179,44 @@ void HipRaytracer::render(int width, int height) {
     // 6. Czekamy aż karta skończy renderować
     HIP_CHECK_VOID(hipDeviceSynchronize());
     std::cout << "[HIP] Kernel zakończył pracę.\n";
+
+    // --- NOWY KROK: POBRANIE WYNIKÓW Z VRAM NA CPU ---
+    std::cout << "[HIP] Kopiowanie wyrenderowanego obrazu do pamięci RAM...\n";
+    std::vector<float> h_output(width * height * 3, 0.0f); // Wektor na dane na CPU
+    
+    HIP_CHECK_VOID(hipMemcpy(h_output.data(), (void*)d_output, buffer_size, hipMemcpyDeviceToHost));
+
+    // Wypiszmy wartość pierwszego wyrenderowanego piksela w lewym górnym rogu
+    std::cout << "\n=== [WYNIKI RENDEROWANIA] ===\n";
+    std::cout << "Piksel [0,0] RGB: (" 
+              << h_output[0] << ", " 
+              << h_output[1] << ", " 
+              << h_output[2] << ")\n";
+
+    // Wypiszmy wartość piksela ze środka ekranu
+    int mid_x = width / 2;
+    int mid_y = height / 2;
+    int mid_idx = (mid_y * width + mid_x) * 3;
+    
+    std::cout << "Piksel [" << mid_x << "," << mid_y << "] RGB: (" 
+              << h_output[mid_idx] << ", " 
+              << h_output[mid_idx + 1] << ", " 
+              << h_output[mid_idx + 2] << ")\n";
+    std::cout << "=============================\n\n";
+
+    // --- WYMUSZONY ZAPIS OBRAZU NA DYSK PRZEZ OIIO ---
+    std::string custom_output = "wynik1.png";
+    auto out_file = OIIO::ImageOutput::create(custom_output);
+    if (out_file) {
+        // Definiujemy strukturę obrazu: szerokość, wysokość, 3 kanały (RGB), typ float
+        OIIO::ImageSpec spec(width, height, 3, OIIO::TypeDesc::FLOAT);
+        out_file->open(custom_output, spec);
+        out_file->write_image(OIIO::TypeDesc::FLOAT, h_output.data());
+        out_file->close();
+        std::cout << "[HIP SUCCESS] Obraz został pomyślnie zapisany w: " << custom_output << "\n";
+    } else {
+        std::cerr << "[BŁĄD HIP] OIIO nie mogło utworzyć pliku: " << custom_output << "\n";
+    }
 
     // 7. Sprzątanie VRAM
     HIP_CHECK_VOID(hipFree((void*)d_output));

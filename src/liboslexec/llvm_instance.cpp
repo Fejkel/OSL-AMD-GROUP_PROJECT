@@ -2502,8 +2502,8 @@ BackendLLVM::run()
 #endif
 // NEW - KB (ZAMIAST OLEK)
 #if OSL_ENABLE_AMDGPU
-    if (shadingsys().use_amdgpu()) {
-        // 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
+if (shadingsys().use_amdgpu() || !shadingsys().amdgpu_architecture().string().empty()) {
+// 1. Zlecamy NASZEJ klasie wyciągnięcie binarnego bitkodu z pamięci
         // (Wywołujemy bez 'll.'!)
         std::vector<uint8_t> bitcode = get_llvm_bitcode(init_func->getParent());
         
