@@ -10,7 +10,7 @@
 #include <map>
 #include <string>
 #include <optional>
-
+#include <iostream>
 // Nagłówki Targetu i Emisji Kodu dla LLVM 18
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Target/TargetMachine.h>
@@ -20,6 +20,9 @@
 
 // WŁAŚCIWY NAGŁÓWEK DLA RE REJESTRACJI STAREGO PASS MANAGERA W LLVM 18:
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/Verifier.h>
 
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/strutil.h>
@@ -1028,96 +1031,218 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode() {
     // Zwracamy wektor bajtów zawierający czysty, skompilowany plik ELF
     return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
 }}; */
-
 std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
     shadingsys().info("=========================================");
-    shadingsys().info("JESTEM W GET_LLVM_BITCODE DLA AMD!");
+    shadingsys().info("[AMD] ROZPOCZYNAM GENEROWANIE KODU DLA GPU");
     shadingsys().info("=========================================");
     
-    // WYBÓR WŁAŚCIWEGO MODUŁU:
+    // 1. WYBÓR WŁAŚCIWEGO MODUŁU:
     llvm::Module* mod = custom_mod ? custom_mod : ll.module();
 
+    // 2. INICJALIZACJA BACKENDU AMDGPU W LLVM
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTarget();
     LLVMInitializeAMDGPUTargetMC();
     LLVMInitializeAMDGPUAsmPrinter();
 
+    // 3. DETEKCJA ARCHITEKTURY SPRZĘTOWEJ RDNA
     std::string arch_str = shadingsys().amdgpu_architecture().string();
     if (arch_str.empty()) {
-        arch_str = "gfx1100";
+        arch_str = "gfx1100"; // Fallback dla RDNA3
     }
 
+    // 4. WYSZUKANIE TARGETU ORAZ KONFIGURACJA TARGET MACHINE
     std::string llvm_error;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget("amdgcn-amd-amdhsa", llvm_error);
     if (!target) {
-        shadingsys().error(OIIO::Strutil::format("LLVM Error: Nie znaleziono targetu AMDGPU (%s)", llvm_error.c_str()));
+        shadingsys().error(OIIO::Strutil::format("LLVM Error: Nie znaleziono targetu AMDGPU: %s", llvm_error.c_str()));
         return std::vector<uint8_t>();
     }
 
-    llvm::TargetOptions options;
-    std::optional<llvm::Reloc::Model> relocation_model = llvm::Reloc::PIC_;
-    
-    std::unique_ptr<llvm::TargetMachine> target_machine(
-        target->createTargetMachine("amdgcn-amd-amdhsa", arch_str, "", options, relocation_model)
-    );
+    llvm::TargetOptions opt;
+    llvm::TargetMachine* target_machine = target->createTargetMachine(
+        "amdgcn-amd-amdhsa", arch_str, "", opt, llvm::Reloc::PIC_,
+        llvm::CodeModel::Small, llvm::CodeGenOptLevel::None);
 
     if (!target_machine) {
-        shadingsys().error("LLVM Error: Nie udalo sie stworzyc TargetMachine dla AMDGPU");
+        shadingsys().error("LLVM Error: Nie udalo sie utworzyc TargetMachine dla AMDGPU");
         return std::vector<uint8_t>();
     }
 
-    // Konfiguracja wybranego modułu pod AMD
+    // Dostosowanie układu pamięci modułu pod architekturę AMD
     mod->setDataLayout(target_machine->createDataLayout());
     mod->setTargetTriple("amdgcn-amd-amdhsa");
 
-    // REJESTRACJA KERNELA DLA NATANA:
-    shadingsys().info("[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---");
+    // [DODAJ TO] Wymuszenie wygenerowania HSA Kernel Descriptors przez LLVM (Kluczowe dla ROCm!)
+    mod->addModuleFlag(llvm::Module::Warning, "amdgpu_code_object_version", 5);
+
+    // 5. LOKALIZACJA GŁÓWNEJ FUNKCJI WYKONAWCZEJ OSL (_exec)
+    llvm::Function* orig_func = nullptr;
     for (llvm::Function &F : *mod) {
         if (!F.isDeclaration()) {
             std::string fname = F.getName().str();
-            shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Zdefiniowano: %s", fname.c_str()));
-            
-            if (fname.find("group") != std::string::npos || 
-                fname.find("exec") != std::string::npos || 
-                fname.find("test") != std::string::npos) {
-                
-                shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] ---> ZNALEZIONO KERNEL GLOWNY! Ustawiam AMDGPU_KERNEL, ExternalLinkage i zmieniałem nazwę na 'osl_kernel'"));
-                F.setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-                F.setLinkage(llvm::GlobalValue::ExternalLinkage);
-                F.setName("osl_kernel");
+            if (fname.find("_exec") != std::string::npos || 
+               (fname.find("group") != std::string::npos && fname.find("exec") != std::string::npos)) {
+                orig_func = &F;
                 break; 
             }
         }
     }
-    shadingsys().info("[LLVM AMDGPU] ----------------------------------");
 
+    if (!orig_func) {
+        shadingsys().error("[LLVM AMDGPU] BLAD! Nie znaleziono wewnętrznej funkcji wykonawczej OSL do owrapowania!");
+        return std::vector<uint8_t>();
+    }
+
+    shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Znaleziono funkcję OSL: %s. Rozpoczynam budowanie Launchera...", orig_func->getName().str()));
+
+    // 6. DYNAMICZNA BUDOWA WRAPPERA (LAUNCHER KERNEL) O NAZWIE "osl_kernel"
+    llvm::LLVMContext &ctx = mod->getContext();
+    llvm::FunctionType *orig_type = orig_func->getFunctionType();
+    std::vector<llvm::Type*> wrapper_param_types;
+
+    for (llvm::Type *param_type : orig_type->params()) {
+        if (param_type->isPointerTy()) {
+            wrapper_param_types.push_back(llvm::PointerType::get(ctx, 1)); 
+        } else {
+            wrapper_param_types.push_back(param_type);
+        }
+    }
+    wrapper_param_types.push_back(llvm::Type::getInt32Ty(ctx)); // + int width
+
+    llvm::FunctionType *wrapper_type = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), wrapper_param_types, false);
+    llvm::Function *wrapper_func = llvm::Function::Create(wrapper_type, llvm::GlobalValue::ExternalLinkage, "osl_kernel", mod);
+    wrapper_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+    
+    wrapper_func->addFnAttr("amdgpu-flat-work-group-size", "1,1024");
+
+    llvm::BasicBlock *entry_block = llvm::BasicBlock::Create(ctx, "entry", wrapper_func);
+    llvm::IRBuilder<> builder(entry_block);
+
+    // 7. WSTRZYKIWANIE KOORDYNATÓW WĄTKÓW
+    llvm::FunctionType *i32_fn_type = llvm::FunctionType::get(builder.getInt32Ty(), false);
+    llvm::FunctionCallee wg_id_x_c = mod->getOrInsertFunction("llvm.amdgcn.workgroup.id.x", i32_fn_type);
+    llvm::FunctionCallee wg_id_y_c = mod->getOrInsertFunction("llvm.amdgcn.workgroup.id.y", i32_fn_type);
+    llvm::FunctionCallee wi_id_x_c = mod->getOrInsertFunction("llvm.amdgcn.workitem.id.x", i32_fn_type);
+    llvm::FunctionCallee wi_id_y_c = mod->getOrInsertFunction("llvm.amdgcn.workitem.id.y", i32_fn_type);
+
+    llvm::Value *wg_id_x = builder.CreateCall(wg_id_x_c);
+    llvm::Value *wg_id_y = builder.CreateCall(wg_id_y_c);
+    llvm::Value *wi_id_x = builder.CreateCall(wi_id_x_c);
+    llvm::Value *wi_id_y = builder.CreateCall(wi_id_y_c);
+
+    llvm::Value *block_dim = builder.getInt32(16);
+    llvm::Value *global_x = builder.CreateAdd(builder.CreateMul(wg_id_x, block_dim), wi_id_x);
+    llvm::Value *global_y = builder.CreateAdd(builder.CreateMul(wg_id_y, block_dim), wi_id_y);
+
+    llvm::Argument *width_arg = wrapper_func->getArg(orig_func->arg_size()); 
+    llvm::Value *pixel_index = builder.CreateAdd(builder.CreateMul(global_y, width_arg), global_x);
+
+    // 8. OBLICZANIE WSKAŹNIKÓW
+    std::vector<llvm::Value*> call_args;
+    auto orig_arg_it = orig_func->arg_begin();
+    size_t arg_idx = 0;
+
+    for (llvm::Argument &wrap_arg : wrapper_func->args()) {
+        if (arg_idx >= orig_func->arg_size()) break;
+
+        llvm::Value *final_val = &wrap_arg;
+
+        if (wrap_arg.getType()->isPointerTy()) {
+            if (arg_idx == 0) { 
+                llvm::Value *offset = builder.CreateMul(pixel_index, builder.getInt32(256));
+                final_val = builder.CreateGEP(builder.getInt8Ty(), &wrap_arg, offset);
+            } else if (arg_idx == 3) { 
+                llvm::Value *offset = builder.CreateMul(pixel_index, builder.getInt32(12)); // 3 kanały RGB!
+                final_val = builder.CreateGEP(builder.getInt8Ty(), &wrap_arg, offset);
+            }
+            final_val = builder.CreateAddrSpaceCast(final_val, orig_arg_it->getType(), "cast_to_flat");
+        }
+        
+        call_args.push_back(final_val);
+        orig_arg_it++;
+        arg_idx++;
+    }
+
+   builder.CreateCall(orig_type, orig_func, call_args);
+    builder.CreateRetVoid();
+    
+    // =========================================================================
+    // 8.5 WYMUSZENIE WIDOCZNOŚCI I ATRYBUTÓW KERNELA (Dla LLVM 18+)
+    // =========================================================================
+    // 1. Zmieniamy całą tożsamość modułu na AMDGPU (KRYTYCZNE!)
+    mod->setTargetTriple(target_machine->getTargetTriple().str());
+    mod->setDataLayout(target_machine->createDataLayout());
+
+    // 2. Oznaczamy nasz wrapper jako KERNEL sprzętowy
+    wrapper_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+    wrapper_func->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    wrapper_func->setVisibility(llvm::GlobalValue::DefaultVisibility);
+    wrapper_func->addFnAttr("amdgpu-kernel"); 
+
+    shadingsys().info("[LLVM AMDGPU] ---> Tożsamość modułu zmieniona na AMDGPU. Wrapper ustawiony jako KERNEL.");
+
+    // =========================================================================
+    // 8.6 ZRZUT WYGENEROWANEGO KODU IR DO PLIKU (NASZ ŚWIADEK KORONNY)
+    // =========================================================================
+    std::error_code EC;
+    llvm::raw_fd_ostream ir_file("/tmp/osl_ir_dump.ll", EC);
+    if (!EC) {
+        mod->print(ir_file, nullptr);
+        ir_file.close();
+        shadingsys().info("[LLVM AMDGPU] Zapisano zrzut kodu LLVM IR do /tmp/osl_ir_dump.ll");
+    } else {
+        shadingsys().error("[LLVM AMDGPU] Nie udalo sie zapisac pliku IR dump.");
+    }
+
+    // Ukrywamy oryginalną funkcję, żeby LLVM skupił się na wyeksportowaniu tylko wrappera
+    orig_func->setLinkage(llvm::GlobalValue::InternalLinkage);
+    // =========================================================================
+    // 8.7 USUWANIE ATRYBUTÓW CPU I WERYFIKACJA (KLUCZOWE DLA CROSS-KOMPILACJI)
+    // =========================================================================
+    for (llvm::Function &F : *mod) {
+        // Zdzieramy atrybuty przypisane do CPU, żeby AMDGPU nie odrzucił tych funkcji
+        F.removeFnAttr("target-cpu");
+        F.removeFnAttr("target-features");
+        F.removeFnAttr("tune-cpu");
+        
+        // Zdejmujemy też atrybuty optymalizacji, które mogłyby blokować inlining
+        F.removeFnAttr(llvm::Attribute::OptimizeNone);
+        F.removeFnAttr(llvm::Attribute::NoInline);
+    }
+
+    shadingsys().info("[LLVM AMDGPU] Atrybuty CPU zostały usunięte. Rozpoczynam weryfikację kodu IR...");
+
+    // Odpalamy weryfikator LLVM - jeśli coś zrobiliśmy źle, wypluje błąd do konsoli (stderr)
+    if (llvm::verifyModule(*mod, &llvm::errs())) {
+        shadingsys().error("[LLVM AMDGPU] FATALNY BŁĄD: Moduł LLVM IR zawiera nieprawidłowe instrukcje! Sprawdź logi wyżej.");
+        return std::vector<uint8_t>();
+    }
+    shadingsys().info("[LLVM AMDGPU] Weryfikacja IR zakończona sukcesem! Przechodzę do emisji ELF.");
+    // =========================================================================
+
+    // 9. EMISJA KODU
     llvm::SmallVector<char, 4096> elf_buffer;
     llvm::raw_svector_ostream dest(elf_buffer);
 
     llvm::legacy::PassManager code_gen_pm;
     if (target_machine->addPassesToEmitFile(code_gen_pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-        shadingsys().error("LLVM Error: Backend kompilatora LLVM 18 nie wspiera bezpośredniej emisji ELF dla AMDGPU");
+        shadingsys().error("LLVM Error: Backend kompilatora LLVM nie wspiera bezpośredniej emisji ELF dla AMDGPU");
         return std::vector<uint8_t>();
     }
 
     code_gen_pm.run(*mod);
 
-    std::string cache_key = group().amdgpu_cache_key() + "_AMDGPU_" + arch_str;
+    // 10. CACHOWANIE
     std::string cache_value(elf_buffer.begin(), elf_buffer.end());
-    
-    std::string filename = "/tmp/" + cache_key + ".bin";
-    std::ofstream out_file(filename, std::ios::binary);
+    std::ofstream out_file("/tmp/osl_temp_shader.o", std::ios::binary);
     if (out_file.is_open()) {
         out_file.write(cache_value.data(), cache_value.size());
         out_file.close();
-        shadingsys().info(OIIO::Strutil::format("Zapisano gotowy AMDGPU ELF do pamięci podręcznej dysku"));
+        shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Zapisano gotowy obiekt ELF (%d B) do /tmp/osl_temp_shader.o", elf_buffer.size()));
     }
 
     return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
-}
-
-}
-
-
+}}
 // namespace pvt
 OSL_NAMESPACE_END
