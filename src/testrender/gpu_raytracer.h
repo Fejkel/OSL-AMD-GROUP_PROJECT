@@ -3,7 +3,7 @@
 #include <string>
 #include <cstddef>
 
-// Uniwersalna struktura do wczytywania bajtów od Osoby 1
+// Uniwersalna struktura do wczytywania bajtów
 struct GPUShaderModuleDesc {
     std::string architecture;
     std::string format;

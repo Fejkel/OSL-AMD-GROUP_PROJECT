@@ -42,6 +42,7 @@ OSL_GCC_PRAGMA(GCC diagnostic ignored "-Wmaybe-uninitialized")
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/ValueSymbolTable.h>
+#include <llvm/IR/CallingConv.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/ErrorOr.h>
@@ -6516,9 +6517,52 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 
 // NEW
 bool
-LLVM_Util::amdgpu_compile_group(llvm::Module*, const std::string& name,
+LLVM_Util::amdgpu_compile_group(llvm::Module* mod, const std::string& name,
                                 std::string& out, const std::string& gpu_arch)
 {
+
+  std::cout << "\n[LLVM AMDGPU] --- Szukanie funkcji w bitcode ---\n";
+    llvm::Function* kernel_func = mod->getFunction(name);
+    if (!kernel_func) {
+        for (auto& F : *mod) {
+            if (!F.isDeclaration() && (F.getName().contains("group") || F.getName().contains("test"))) {
+                kernel_func = &F;
+                break;
+            }
+        }
+    }
+    
+    
+    if (kernel_func) {
+        // Wymuszamy publiczną, globalną widoczność w tablicy symboli ELF
+        kernel_func->setLinkage(llvm::GlobalValue::ExternalLinkage);
+
+        // Ustawiamy konwencję wywołania jako KERNEL karty AMD
+        kernel_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+
+        // Nadajemy jej sztywną nazwę, którą wczytamy w hipModuleGetFunction
+        kernel_func->setName("osl_kernel");
+        
+        std::cout << "[LLVM Backend] Sukces: Wyeksportowano publiczny symbol 'osl_kernel' dla GPU!\n";
+    }
+    std::cout << "[LLVM AMDGPU] ----------------------------------\n\n";
+    
+    /*
+    for (llvm::Function &F : *module()) {
+        if (!F.isDeclaration()) {
+            std::string fname = F.getName().str();
+            std::cout << "[LLVM AMDGPU] Zdefiniowano: " << fname << "\n";
+            
+            if (fname.find("group") != std::string::npos || fname.find("exec") != std::string::npos) {
+                std::cout << "[LLVM AMDGPU] ---> ZNALEZIONO KERNEL! Ustawiam AMDGPU_KERNEL i ExternalLinkage\n";
+                   
+                F.setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+                F.setLinkage(llvm::GlobalValue::ExternalLinkage);
+            }
+        }
+    }
+    std::cout << "[LLVM AMDGPU] ----------------------------------\n\n";
+    // ---------------------------------------------------------------*/
 
     llvm::TargetMachine* target_machine = amdgpu_target_machine(gpu_arch);
     llvm::legacy::PassManager mpm;
@@ -6536,7 +6580,7 @@ LLVM_Util::amdgpu_compile_group(llvm::Module*, const std::string& name,
                                         llvm::CGFT_ObjectFile);
 #endif
 
-    mpm.run(*module());
+    mpm.run(*mod);
 
     out = binary_buffer.str().str();
 

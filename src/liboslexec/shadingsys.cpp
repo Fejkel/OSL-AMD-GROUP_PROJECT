@@ -29,7 +29,7 @@
 
 #include "opcolor.h"
 
-// NEW - KB
+// NEW
 
 #include <map>
 #include <string>
@@ -37,6 +37,8 @@
 // Odniesienie do mapy z backendllvm.cpp
 extern std::map<std::string, std::string> g_amdgpu_temp_cache;
 
+// NEW
+#include <unordered_map>
 // END NEW
 
 using namespace OSL;
@@ -67,6 +69,15 @@ extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 
 
 OSL_NAMESPACE_BEGIN
+
+// NEW
+namespace pvt {
+
+// NEW
+std::map<const void*, std::vector<uint8_t>> g_amdgpu_elf_registry;
+std::mutex g_amdgpu_registry_mutex;
+
+}
 
 // NEW
 static OSL::GPUTargetDesc make_amdgpu_target(const std::vector<std::string>& archs) {
@@ -1180,7 +1191,7 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_stat_max_llvm_local_mem(0)
 {
 
-    // NEW - KB 
+    // NEW 
 if (renderer && (renderer->supports("AMDGPU") || renderer->supports("HIP"))) {
     std::string hip_arch_str = "gfx1100";
     renderer->get_attribute(nullptr, false, OSL::ustring(), TypeDesc::STRING, OSL::ustring("amdgpu_architecture"), &hip_arch_str);
@@ -1633,14 +1644,17 @@ osl_simd_caps()
     // clang-format on
 }
 
-// NEW - KB
+// NEW
 void 
 ShadingSystemImpl::amdgpu_cache_unwrap(const std::string& cache_value, ShaderGroup& group)
 {
-    // Zamieniamy string z cache na wektor bajtów
+    // 1. Zamieniamy string z cache na wektor bajtów
     std::vector<uint8_t> data(cache_value.begin(), cache_value.end());
     
-    // Pakujemy to z powrotem do wektora artefaktów, który stworzyliśmy wcześniej
+    // 2. Synchronizacja: zapisujemy do pola, z którego korzysta rejestr
+    group.m_amdgpu_elf = data; 
+    
+    // 3. Pakujemy to do kontenera OSL 
     group.m_compiled_gpu_artifacts.push_back(
         CompiledGPUArtifact(data, m_amdgpu_architecture.string(), "llvm_bitcode", OSL_LLVM_VERSION)
     );
@@ -1672,7 +1686,7 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     }
 
     lock_guard guard(m_mutex);  // Thread safety
-    // NEW - KB 
+    // NEW
     ATTR_SET("amdgpu", int, m_use_amdgpu);
     ATTR_SET("amdgpu_cache", int, m_use_amdgpu_cache);
     ATTR_SET_STRING("amdgpu_architecture", m_amdgpu_architecture);
@@ -2177,7 +2191,7 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
             int index = 0;
             char prop[32] = {0};
             
-            // NEW - KB NA CHWILE
+            // NEW
                 std::string name_str(name);
                 if (sscanf(name_str.c_str(), "gpu_artifact:%d:%31s", &index, prop) == 2) {
 
@@ -2191,7 +2205,7 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
                             *(const void**)val = artifact.payload.data();
                         return true;
                     }
-                    // NEW - KB
+                    // NEW
                     else if (prop_str == "size") {
                         if (type == TypeDesc::INT) {
                             if (val) *(int*)val = (int)artifact.payload.size();
@@ -3839,7 +3853,11 @@ ShadingSystemImpl::group_post_jit_cleanup(ShaderGroup& group)
     }
 }
 
-
+    //NEWNEW
+void register_amdgpu_artifact_in_registry(const void* group_ptr, const std::vector<uint8_t>& elf_data) {
+    std::lock_guard<std::mutex> lock(g_amdgpu_registry_mutex);
+    g_amdgpu_elf_registry[group_ptr] = elf_data;
+}
 
 void
 ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
@@ -3957,7 +3975,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                                    group.m_llvm_groupdata_size);
             }
         }
-        // NEW - KB
+        // NEW 
         else if (use_amdgpu_cache()) { 
             // 1. Pobieramy unikalny klucz dla tej grupy shaderów
             std::string cache_key = group.amdgpu_cache_key() 
@@ -3966,7 +3984,6 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
 
             std::string cache_value;
             // 2. Szukamy w systemowym cache OSL pod kluczem "amdgpu_bc"
-            // !!!!! if (renderer()->cache_get("amdgpu_bc", cache_key, cache_value)) {
             std::string filename = "/tmp/" + cache_key + ".bin";
             std::ifstream in_file(filename, std::ios::binary);
 
@@ -3975,16 +3992,52 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                 std::stringstream buffer;
                 buffer << in_file.rdbuf();
                 cache_value = buffer.str();
-                
                 cached = true;
                 amdgpu_cache_unwrap(cache_value, group);
+                // NEW
+                register_amdgpu_artifact_in_registry(&group, group.m_amdgpu_elf);
                 
-                // Użyj .c_str() żeby %s zadziałało:
-                info(OIIO::Strutil::format("Zastosowano AMDGPU Cache z dysku dla grupy %s", group.name().c_str()));
+                static std::once_flag cache_logged_flag;
+                std::call_once(cache_logged_flag, [this]() {
+                    this->info("INFO: Zastosowano AMDGPU Cache z dysku...");
+                });
             }
         }
 
         if (!cached) {
+	// NEW
+        // Sprawdzamy, czy użytkownik zażądał kompilacji na AMDGPU
+//         	if (use_amdgpu_cache() || !m_amdgpu_architecture.string().empty()) {
+
+//                 // 1. Tworzymy instancję backendu LLVM
+//                 BackendLLVM lljitter(*this, group, ctx);
+
+//                 std::cout << "[DEBUG] Backend utworzony. Wywołuję run()...\n";
+
+//                 // 2. Czy lljitter wymaga jawnego uruchomienia? Spróbuj odkomentować/dodać:
+//                 lljitter.run(); 
+
+//                 // 3. Teraz pobierz bitcode
+//                 std::vector<uint8_t> amd_elf = lljitter.get_llvm_bitcode();
+
+//                 std::cout << "[DEBUG] Rozmiar pobranego bitkodu: " << amd_elf.size() << " bajtów.\n"; 
+
+//                 if (amd_elf.empty()) {
+//                     error(OIIO::Strutil::format("Blad: Kompilacja do AMDGPU ELF dla grupy %s nie powiodla sie!", group.name().c_str()));
+//                 } else {
+//                     // 3. Zapisujemy wygenerowane artefakty w grupie shaderów                     
+//                     group.m_amdgpu_elf = amd_elf; 
+
+//                     // NEW 
+//                     register_amdgpu_artifact_in_registry(&group, amd_elf);
+
+//                     info(OIIO::Strutil::format("Sukces: Wygenerowano i zaladowano AMDGPU ELF dla %s", group.name().c_str()));
+//                 }
+
+//                 // Ustawiamy flagę, że grupa została przetworzona, aby uniknąć standardowego czyszczenia CPU
+//                 group.m_jitted = true; 
+
+//             } else {
             BackendLLVM lljitter(*this, group, ctx);
             lljitter.run();
 
@@ -4003,6 +4056,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             }
 
             group.m_jitted = true;
+            
             spin_lock stat_lock(m_stat_mutex);
             m_stat_opt_locking_time += locking_time;
             m_stat_optimization_time += timer();
@@ -4013,6 +4067,7 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
             m_stat_llvm_jit_time += lljitter.m_stat_llvm_jit_time;
             m_stat_max_llvm_local_mem = std::max(m_stat_max_llvm_local_mem,
                                                  lljitter.m_llvm_local_mem);
+            
         }
     }
 
@@ -4981,4 +5036,94 @@ osl_incr_get_userdata_calls(void* sg_)
 {
     ShaderGlobals* sg = (ShaderGlobals*)sg_;
     sg->context->incr_get_userdata_calls();
+}
+
+//NEW
+
+
+extern "C" OSLEXECPUBLIC bool OSL_get_amdgpu_artifact(const void* group_ptr, uint8_t* out_buffer, size_t* out_size) {
+    std::lock_guard<std::mutex> lock(g_amdgpu_registry_mutex);
+    
+    // Szukamy używając wskaźnika! Bez konwersji na std::string
+    auto it = g_amdgpu_elf_registry.find(group_ptr);
+    
+    if (it == g_amdgpu_elf_registry.end()) {
+        return false; // Nie znaleziono artefaktu dla tej grupy
+    }
+    
+    // Jeśli podano bufor, kopiujemy dane
+    if (out_buffer != nullptr) {
+        std::memcpy(out_buffer, it->second.data(), it->second.size());
+    }
+    
+    // Zwracamy rozmiar, żeby runtime wiedział ile pamięci zaalokować
+    if (out_size != nullptr) {
+        *out_size = it->second.size();
+    }
+    
+    return true;
+}
+
+
+class DummyRenderer : public OSL::RendererServices {
+public:
+    DummyRenderer() : OSL::RendererServices() {}
+};
+
+extern "C" OSLEXECPUBLIC bool OSL_run_gpu_backend(const std::string& oso_file, const std::string& arch) {
+    auto texturesys = OIIO::TextureSystem::create();
+    auto renderer = new DummyRenderer();
+    OSL::ShadingSystem* ss = new OSL::ShadingSystem(renderer, texturesys); 
+    
+    ss->attribute("amdgpu_architecture", arch);
+    ss->attribute("amdgpu", 1); 
+
+
+    int opt = 0;
+    ss->attribute("optimize", opt);
+    ss->attribute("opt_elide_unconnected_outputs", 0);
+    ss->attribute("lazyunconnected", 0);
+    
+    // Zabezpieczenie nr 2: Wymuszamy, by optymalizator uważał wyjścia `Ci` i `Cout` za potrzebne
+    const char* aovs[] = {"Ci", "Cout"};
+    ss->attribute("renderer_outputs", OSL::TypeDesc(OSL::TypeDesc::STRING, 2), &aovs[0]);
+
+    OSL::ShaderGroupRef group = ss->ShaderGroupBegin();
+    if (!ss->Shader("surface", oso_file, "")) {
+        delete ss; delete renderer; return false;
+    }
+    ss->ShaderGroupEnd(*group);
+    OSL::SymLocationDesc symloc(OSL::ustring("Cout"), OSL::TypeDesc::TypeColor, false, OSL::SymArena::Outputs, 0, 12);
+    std::vector<OSL::SymLocationDesc> symlocs = { symloc };
+    ss->add_symlocs(group.get(), symlocs);
+    
+    std::cout << "[DEBUG-SHADINGSYS] Odpalam optymalizacje i JIT LLVM...\n";
+    // Zlecenie wygenerowania kodu i obiektu .o przez backend
+    ss->optimize_group(group.get(), nullptr, true);
+    std::cout << "[DEBUG-SHADINGSYS] Optymalizacja zrobiona. LLVM zakonczyl prace.\n";
+
+    // Sprawdzamy, czy LLVM faktycznie wypuścił plik. Jeśli nie, logujemy ładny błąd zamiast crasza Clanga.
+    std::string temp_o_file = "/tmp/osl_temp_shader.o";
+    if (!OIIO::Filesystem::exists(temp_o_file)) {
+        std::cerr << "FATAL: Plik .o nie zostal wygenerowany przez LLVM!\n";
+        std::cerr << "Prawdopodobna przyczyna: OSL uznał, że shader nic nie robi (does_nothing == true).\n";
+        delete ss; delete renderer; return false;
+    }
+
+    std::cout << "[DEBUG-SHADINGSYS] Linkuje do .hsaco...\n";
+
+    std::string base_name = oso_file.substr(0, oso_file.find_last_of('.'));
+    std::string hsaco_file = base_name + ".hsaco";
+
+    std::string link_cmd = "clang -target amdgcn-amd-amdhsa -mcpu=" + arch + " -shared " + temp_o_file + " -o " + hsaco_file;
+    if (std::system(link_cmd.c_str()) != 0) {
+        std::cerr << "FATAL: Linker (clang) zwrócił błąd!\n";
+        delete ss; delete renderer; return false;
+    }
+
+    OIIO::Filesystem::remove(temp_o_file);
+    std::cout << "[oslc] SUKCES! Gotowy plik jądra zapisany jako: " << hsaco_file << "\n";
+    
+    delete ss; delete renderer;
+    return true;
 }

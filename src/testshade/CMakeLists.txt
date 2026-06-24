@@ -6,7 +6,7 @@
 set ( testshade_srcs
       testshade.cpp
       simplerend.cpp
-      ../testrender/hip_raytracer.cpp) # New - NA
+      ../testrender/hip_raytracer.cpp) # New 
 
 if (OSL_BUILD_BATCHED)
     list(APPEND testshade_srcs
@@ -76,7 +76,7 @@ list(APPEND include_dirs ${OpenImageIO_INCLUDES})
 
 EMBED_LLVM_BITCODE_IN_CPP ( "${rs_srcs}" "_host" "testshade_llvm_compiled_rs" testshade_srcs "-DOSL_HOST_RS_BITCODE=1" "${include_dirs}")
 
-# --- INTEGRACJA AMD ROCm HIP (Zmiany Kacpra) ---
+# --- INTEGRACJA AMD ROCm HIP  ---
 find_package(HIP REQUIRED)
 
 # Budowanie głównego programu wykonywalnego testshade

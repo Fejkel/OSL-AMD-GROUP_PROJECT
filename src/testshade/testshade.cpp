@@ -24,8 +24,7 @@
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/sysutil.h>
 #include <OpenImageIO/timer.h>
-#include "../testrender/hip_raytracer.h" // New - Na
-
+#include "../testrender/hip_raytracer.h" // New 
 #include <OSL/encodedtypes.h>
 #include <OSL/journal.h>
 #include <OSL/oslcomp.h>
@@ -44,6 +43,8 @@
 
 extern int testshade_llvm_compiled_rs_size;
 extern unsigned char testshade_llvm_compiled_rs_block[];
+
+
 
 using namespace OSL;
 using OIIO::ParamValue;
@@ -130,10 +131,9 @@ static char* output_base_ptr   = nullptr;
 static bool use_rs_bitcode
     = false;  // use free function bitcode version of renderer services
 static int jbufferMB = 16;
-// NEW - Ka
-// AMDGPU support: storage for CLI arguments
-static std::string amdgpu_arch;  // Target architecture (e.g., "gfx1100")
-static bool save_amdgpu = false; // Flag to trigger bitcode export to disk
+// NEW 
+// Flagi dla trybu AOT GPU
+static bool use_hip_runtime = false;
 
 // Testshade thread tracking and assignment.
 // Not recommended for production renderer but fine for testshade
@@ -865,12 +865,10 @@ getargs(int argc, const char* argv[])
       .help("Use free function bitcode Renderer services");
     ap.arg("--jbufferMB %d:JBUFFER",  &jbufferMB)
       .help("journal jbuffer size in MB");
-    //NEW - Ka
+    //NEW 
     // AMDGPU backend options: allow specifying the GPU target and saving the artifact
-      ap.arg("--device %s", &amdgpu_arch)
-      .help("Target AMD GPU architecture (e.g. gfx1100)");
-    ap.arg("--save-amdgpu", &save_amdgpu)
-      .help("Save the generated AMDGPU bitcode to a file");
+    ap.arg("--hip-runtime", &use_hip_runtime)
+      .help("Uruchom renderer w trybie sprzętowym AMD HIP (wczytuje plik .hsaco o nazwie shadera)");
 
     // clang-format on
     ap.parse_args(argc, argv);
@@ -1994,13 +1992,6 @@ test_shade(int argc, const char* argv[])
     // TextureSystem (note: passing nullptr just makes the ShadingSystem
     // make its own TS), and an error handler.
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
-    //NEW - Ka
-    // Configure AMDGPU target architecture if requested via CLI.
-    if (!amdgpu_arch.empty()) {
-        shadingsys->attribute("amdgpu_architecture", amdgpu_arch);
-        if (verbose)
-        std::cout << "Setting OSL attribute: amdgpu_target = " << amdgpu_arch << "\n";
-    }
 
     rend->init_shadingsys(shadingsys);
 
@@ -2288,59 +2279,62 @@ test_shade(int argc, const char* argv[])
 
     double runtime = timer.lap();
 
-    // NEW - NATAN (Integracja Architektury AMDGPU)
-    // Jeśli użytkownik wybrał architekturę (np. --device gfx1100), odpalamy Twój renderer
-    if (!amdgpu_arch.empty()) {
-        
-        // 1. Inicjalizacja Twojego polimorficznego renderera
-        std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
-        gpu_renderer->init();
+// NEW 
+    // AMDGPU AOT RUNTIME 
+    if (use_hip_runtime) {
+        std::cout << "[Testshade] Tryb AOT: Przygotowanie renderera HIP...\n";
 
-        int num_artifacts = 0;
-        if (shadingsys->getattribute(shadergroup.get(), "gpu_num_artifacts", num_artifacts) && num_artifacts > 0) {
-            for (int i = 0; i < num_artifacts; ++i) {
-                const void* data_ptr = nullptr;
-                size_t artifact_size = 0; 
-                ustring arch, format;
-
-                std::string attr_data = OIIO::Strutil::format("gpu_artifact:%d:data", i);
-                std::string attr_size = OIIO::Strutil::format("gpu_artifact:%d:size", i); 
-                std::string attr_arch = OIIO::Strutil::format("gpu_artifact:%d:architecture", i);
-                std::string attr_form = OIIO::Strutil::format("gpu_artifact:%d:format", i);
-
-                if (shadingsys->getattribute(shadergroup.get(), attr_data, TypeDesc::PTR, &data_ptr) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_size, TypeDesc::UINT64, &artifact_size) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_arch, arch) &&
-                    shadingsys->getattribute(shadergroup.get(), attr_form, format)) {
-
-                    // 2. Pakowanie danych do Twojej uniwersalnej struktury
-                    GPUShaderModuleDesc desc;
-                    desc.architecture = arch.string();
-                    desc.format = format.string();
-                    desc.data_ptr = data_ptr;
-                    desc.data_size = artifact_size;
-
-                    // 3. Ładowanie bajtów do sztucznego środowiska HIP
-                    gpu_renderer->load_shader(desc);
-
-                    // 4. (Opcjonalnie) Zapis na dysk, jeśli podano flagę --save-amdgpu
-                    if (save_amdgpu) {
-                        std::string ext = (format == "llvm_bitcode") ? ".bc" : ".o";
-                        std::string out_filename = OIIO::Strutil::format("shader_%s%s", arch.c_str(), ext);
-                        std::ofstream outfile(out_filename, std::ios::binary);
-                        if (outfile.is_open()) {
-                            outfile.write((const char*)data_ptr, artifact_size);
-                            std::cout << "[Testshade] Zapisano artefakt na dysk: " << out_filename << "\n";
-                        }
-                    }
-                }
-            }
-        } else {
-            std::cerr << "WARNING: No AMDGPU artifacts found in ShadingSystem.\n";
+        if (shadernames.empty()) {
+            std::cerr << "FATAL: Brak zadeklarowanego shadera do wczytania!\n";
+            return EXIT_FAILURE;
         }
 
-        // 5. Finałowy "render" w HIP
-        gpu_renderer->render(xres, yres); 
+        // 1. Inicjalizacja renderera
+        std::unique_ptr<GPURaytracer> gpu_renderer = std::make_unique<HipRaytracer>();
+        if (!gpu_renderer->init()) {
+            std::cerr << "FATAL: Błąd inicjalizacji HIP!\n";
+            return EXIT_FAILURE;
+        }
+
+        // 2. Pobranie nazwy shadera (np. "moj_material") i doklejenie ".hsaco"
+        // Używamy OIIO, by pozbyć się rozszerzenia .oso (jeśli użytkownik je podał)
+        std::string base_name = OIIO::Filesystem::replace_extension(shadernames[0], "");
+        std::string hsaco_filename = base_name + ".hsaco";
+        
+        std::cout << "[Testshade] Szukam gotowego pliku jądra GPU: " << hsaco_filename << "\n";
+        
+        std::vector<char> hsaco_buffer;
+        size_t file_size = OIIO::Filesystem::file_size(hsaco_filename);
+        if (file_size > 0) {
+            hsaco_buffer.resize(file_size);
+            if (OIIO::Filesystem::read_bytes(hsaco_filename, (void*)hsaco_buffer.data(), file_size) != file_size) {
+                std::cerr << "FATAL: Nie udało się wczytać pliku .hsaco!\n";
+                return EXIT_FAILURE;
+            }
+        }
+
+        // 3. Pakujemy bajty i wysyłamy prosto do HIP-a
+        GPUShaderModuleDesc desc;
+        desc.architecture = "auto"; // W trybie AOT (hipModuleLoadData) to nie ma znaczenia
+        desc.format = "hsaco";
+        desc.data_ptr = hsaco_buffer.data();
+        desc.data_size = hsaco_buffer.size();
+
+        if (!gpu_renderer->load_shader(desc)) {
+            std::cerr << "FATAL: Nie udało się załadować pliku " << hsaco_filename << " do HIP-a!\n";
+            return EXIT_FAILURE;
+        }
+
+        // 4. Łączymy GPU z pamięcią RAM dla obrazu wyjściowego
+        if (OIIO::ImageBuf* main_img = rend->outputbuf(0)) {
+            auto* hip_renderer = static_cast<HipRaytracer*>(gpu_renderer.get());
+            hip_renderer->set_host_buffer((float*)main_img->localpixels());
+        } else {
+            std::cerr << "[HIP] OSTRZEŻENIE: Nie udało się pobrać głównego bufora obrazu!\n";
+        }
+
+        // 5. Renderujemy na sprzęcie
+        gpu_renderer->render(xres, yres);
     }
 
     // This awkward condition preserves an output oddity from long ago,

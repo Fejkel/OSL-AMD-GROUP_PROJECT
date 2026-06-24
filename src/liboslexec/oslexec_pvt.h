@@ -668,7 +668,7 @@ public:
     bool use_optix() const { return m_use_optix; }
     bool use_optix_cache() const { return m_use_optix_cache; }
 
-    // NEW - KB 
+    // NEW 
     bool use_amdgpu() const { return m_use_amdgpu; }
     bool use_amdgpu_cache() const { return m_use_amdgpu_cache; }
     ustring amdgpu_architecture() const { return m_amdgpu_architecture; }
@@ -1000,7 +1000,7 @@ private:
     int m_compile_report;    ///< Print compilation report?
     bool m_use_optix;        ///< This is an OptiX-based renderer
     bool m_use_optix_cache;  ///< Renderer-enabled caching for OptiX ptx
-    // NEW - KB 
+    // NEW  
     bool m_use_amdgpu = false;
     bool m_use_amdgpu_cache = true;
     ustring m_amdgpu_architecture;
@@ -1899,7 +1899,7 @@ public:
     void generate_optix_cache_key(string_view code);
     std::string optix_cache_key() const { return m_optix_cache_key; }
 
-    // NEW - KB
+    // NEW 
     std::string amdgpu_cache_key() const {
         return m_name.string();   
     }
@@ -2113,8 +2113,10 @@ private:
 
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
-
-    std::vector<OSL::CompiledGPUArtifact> m_compiled_gpu_artifacts; //NEW
+    
+    // NASZ KONTENER NA BINARIA AMDGPU
+    std::vector<uint8_t> m_amdgpu_elf;  //NEWNEW 
+    std::vector<OSL::CompiledGPUArtifact> m_compiled_gpu_artifacts; //NEWNEW 
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params
