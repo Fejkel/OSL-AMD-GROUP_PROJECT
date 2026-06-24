@@ -76,7 +76,7 @@ if (CMAKE_COMPILER_IS_INTELCLANG)
     # model, although with slightly different numerical results.
 endif ()
 
-# --- INTEGRACJA AMD ROCm HIP (Zmiany Kacpra) ---
+# --- INTEGRACJA AMD ROCm HIP  ---
 find_package(HIP REQUIRED)
 
 # Tworzenie celu wykonywalnego testrender (tylko RAZ w pliku)
