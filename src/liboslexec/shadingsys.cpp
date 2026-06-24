@@ -71,8 +71,13 @@ extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 OSL_NAMESPACE_BEGIN
 
 // NEWNEW - KB
+namespace pvt {
+
+// NEWNEW - KB
 std::map<const void*, std::vector<uint8_t>> g_amdgpu_elf_registry;
 std::mutex g_amdgpu_registry_mutex;
+
+}
 
 // NEW
 static OSL::GPUTargetDesc make_amdgpu_target(const std::vector<std::string>& archs) {
@@ -5058,5 +5063,74 @@ extern "C" OSLEXECPUBLIC bool OSL_get_amdgpu_artifact(const void* group_ptr, uin
         *out_size = it->second.size();
     }
     
+    return true;
+}
+
+// --- DODANE NA SAMYM KOŃCU PLIKU shadingsys.cpp ---
+
+class DummyRenderer : public OSL::RendererServices {
+public:
+    DummyRenderer() : OSL::RendererServices() {}
+};
+
+extern "C" OSLEXECPUBLIC bool OSL_run_gpu_backend(const std::string& oso_file, const std::string& arch) {
+    auto texturesys = OIIO::TextureSystem::create();
+    auto renderer = new DummyRenderer();
+    OSL::ShadingSystem* ss = new OSL::ShadingSystem(renderer, texturesys); 
+    
+    ss->attribute("amdgpu_architecture", arch);
+    ss->attribute("amdgpu", 1); 
+
+    // =========================================================================
+    // [KRYTYCZNE]: TŁUMIENIE MARTWEGO KODU (DEAD-CODE ELIMINATION)
+    // Mówimy optymalizatorowi, by nie wycinał shadera, który nie jest podłączony 
+    // do pełnoprawnego silnika renderującego.
+    // =========================================================================
+    int opt = 0;
+    ss->attribute("optimize", opt);
+    ss->attribute("opt_elide_unconnected_outputs", 0);
+    ss->attribute("lazyunconnected", 0);
+    
+    // Zabezpieczenie nr 2: Wymuszamy, by optymalizator uważał wyjścia `Ci` i `Cout` za potrzebne
+    const char* aovs[] = {"Ci", "Cout"};
+    ss->attribute("renderer_outputs", OSL::TypeDesc(OSL::TypeDesc::STRING, 2), &aovs[0]);
+
+    OSL::ShaderGroupRef group = ss->ShaderGroupBegin();
+    if (!ss->Shader("surface", oso_file, "")) {
+        delete ss; delete renderer; return false;
+    }
+    ss->ShaderGroupEnd(*group);
+    OSL::SymLocationDesc symloc(OSL::ustring("Cout"), OSL::TypeDesc::TypeColor, false, OSL::SymArena::Outputs, 0, 12);
+    std::vector<OSL::SymLocationDesc> symlocs = { symloc };
+    ss->add_symlocs(group.get(), symlocs);
+    
+    std::cout << "[DEBUG-SHADINGSYS] Odpalam optymalizacje i JIT LLVM...\n";
+    // Zlecenie wygenerowania kodu i obiektu .o przez backend
+    ss->optimize_group(group.get(), nullptr, true);
+    std::cout << "[DEBUG-SHADINGSYS] Optymalizacja zrobiona. LLVM zakonczyl prace.\n";
+
+    // Sprawdzamy, czy LLVM faktycznie wypuścił plik. Jeśli nie, logujemy ładny błąd zamiast crasza Clanga.
+    std::string temp_o_file = "/tmp/osl_temp_shader.o";
+    if (!OIIO::Filesystem::exists(temp_o_file)) {
+        std::cerr << "FATAL: Plik .o nie zostal wygenerowany przez LLVM!\n";
+        std::cerr << "Prawdopodobna przyczyna: OSL uznał, że shader nic nie robi (does_nothing == true).\n";
+        delete ss; delete renderer; return false;
+    }
+
+    std::cout << "[DEBUG-SHADINGSYS] Linkuje do .hsaco...\n";
+
+    std::string base_name = oso_file.substr(0, oso_file.find_last_of('.'));
+    std::string hsaco_file = base_name + ".hsaco";
+
+    std::string link_cmd = "clang -target amdgcn-amd-amdhsa -mcpu=" + arch + " -shared " + temp_o_file + " -o " + hsaco_file;
+    if (std::system(link_cmd.c_str()) != 0) {
+        std::cerr << "FATAL: Linker (clang) zwrócił błąd!\n";
+        delete ss; delete renderer; return false;
+    }
+
+    OIIO::Filesystem::remove(temp_o_file);
+    std::cout << "[oslc] SUKCES! Gotowy plik jądra zapisany jako: " << hsaco_file << "\n";
+    
+    delete ss; delete renderer;
     return true;
 }

@@ -76,7 +76,7 @@ HipRaytracer::~HipRaytracer() {
 }
 //NEWNEW - KB
 // -------------------------------------------------------------------------
-// 2. Ładowanie skompilowanego modułu OSL (pliku binarnego ELF dla AMD) - Na
+// 2. Ładowanie skompilowanego modułu OSL (pliku binarnego HSACO dla AMD)
 // -------------------------------------------------------------------------
 bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
     if (!desc.data_ptr || desc.data_size == 0) {
@@ -84,36 +84,14 @@ bool HipRaytracer::load_shader(const GPUShaderModuleDesc& desc) {
         return false;
     }
 
-    const std::string hsaco_input  = "/tmp/osl_temp_shader.o";
-    const std::string hsaco_output = "/tmp/gotowy_shader.hsaco";
+    // W PODEJŚCIU AOT OTRZYMUJEMY JUŻ GOTOWY KOD HSACO (nie obiekt ELF .o)
+    std::cout << "[HIP] Ładowanie gotowego modułu HSACO z pamięci (" << desc.data_size << " bajtów)...\n";
 
-    // 1. Zapisz surowy obiekt ELF na dysk
-    {
-        std::ofstream f(hsaco_input, std::ios::binary);
-        if (!f) {
-            std::cerr << "BŁĄD: Nie można otworzyć " << hsaco_input << " do zapisu!\n";
-            return false;
-        }
-        f.write(static_cast<const char*>(desc.data_ptr), desc.data_size);
-    }
-    std::cout << "[HIP] Zapisano obiekt (" << desc.data_size << " B) do " << hsaco_input << "\n";
+    // Używamy hipModuleLoadData, żeby załadować kernel PROSTO Z PAMIĘCI RAM.
+    // Omija to całkowicie potrzebę zapisywania na dysk i wywoływania linkera ld.lld!
+    HIP_CHECK(hipModuleLoadData(&m_module, desc.data_ptr));
 
-    // 2. Linkowanie object file -> hsaco przez ld.lld
-    const std::string link_cmd =
-        "/opt/rocm-7.2.4/lib/llvm/bin/ld.lld -shared "
-        + hsaco_input + " -o " + hsaco_output;
-    std::cout << "[HIP] Linkowanie: " << link_cmd << "\n";
-
-    if (std::system(link_cmd.c_str()) != 0) {
-        std::cerr << "BŁĄD: Linkowanie ld.lld nie powiodło się!\n";
-        return false;
-    }
-
-    // 3. Załaduj moduł GPU
-    std::cout << "[HIP] Ładowanie modułu GPU z: " << hsaco_output << "\n";
-    HIP_CHECK(hipModuleLoad(&m_module, hsaco_output.c_str()));
-
-    // 4. Pobierz wskaźnik na kernel (w tej wersji wymuszamy "osl_kernel")
+    // Pobierz wskaźnik na kernel
     std::cout << "[HIP] Szukam kernela: osl_kernel\n";
     hipError_t err = hipModuleGetFunction(&m_kernel, m_module, "osl_kernel");
     if (err != hipSuccess) {

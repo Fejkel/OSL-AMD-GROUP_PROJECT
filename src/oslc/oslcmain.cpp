@@ -15,6 +15,8 @@
 
 #include <OSL/oslcomp.h>
 #include <OSL/oslexec.h>
+extern "C" bool OSL_run_gpu_backend(const std::string& oso_file, const std::string& arch);
+
 using namespace OSL;
 
 
@@ -45,8 +47,7 @@ usage()
            "\t-MF filename   Specify the name of the depfile to output (for -MD, -MMD)\n"
            "\t-MT target     Specify a custom dependency target name for -M...\n"
            "\t--amdgpu       Compile for AMDGPU backend\n"
-           "\t--hip-runtime  Use HIP runtime for AMDGPU\n"
-           "\t--devicename  Specify target AMD device (e.g., gfx1030, gfx1100)\n";
+           "\t--device  Specify target AMD device (e.g., gfx1030, gfx1100)\n";
 }
 
 
@@ -118,8 +119,7 @@ main(int argc, const char* argv[])
 
     // NEW
     [[maybe_unused]] bool use_amdgpu = false;
-    [[maybe_unused]] bool use_hip_runtime = false;
-    [[maybe_unused]] std::string amd_device = "";
+    [[maybe_unused]] std::string amd_device = "gfx1030";
 
     // Parse arguments from command line
     for (int a = 1; a < argc; ++a) {
@@ -167,9 +167,6 @@ main(int argc, const char* argv[])
             use_amdgpu = true;
             // NEW
             args.emplace_back(argv[a]); 
-        } else if (!strcmp(argv[a], "--hip-runtime")) {
-            use_hip_runtime = true;
-            args.emplace_back(argv[a]);
         } else if (!strcmp(argv[a], "--device") && a < argc - 1) {
             args.emplace_back(argv[a]); 
             ++a;                       
@@ -211,11 +208,23 @@ main(int argc, const char* argv[])
         // Ordinary compile from file
         ok = compiler.compile(shader_path, args);
     }
-
+    
     if (ok) {
         if (!quiet)
             std::cout << "Compiled " << shader_path << " -> "
                       << compiler.output_filename() << "\n";
+        if (use_amdgpu) {
+            std::cout << "[oslc] Generowanie jądra AMDGPU dla architektury: " << amd_device << "...\n";
+            
+            // Przekazujemy ścieżkę do skompilowanego .oso do bezpiecznego backendu
+            bool success = OSL_run_gpu_backend(compiler.output_filename().data(), amd_device);
+            
+            if (!success) {
+                std::cerr << "FATAL: Backend GPU zwrócił błąd!\n";
+                return EXIT_FAILURE;
+            }
+            std::cout << "[oslc] SUKCES! Gotowy plik .hsaco znajduje się na dysku.\n";
+        }
     } else {
         std::cout << "FAILED " << shader_path << "\n";
         return EXIT_FAILURE;

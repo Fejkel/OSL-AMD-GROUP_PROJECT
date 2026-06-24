@@ -998,7 +998,7 @@ std::vector<uint8_t> BackendLLVM::get_llvm_bitcode(llvm::Module* custom_mod) {
     mod->setTargetTriple("amdgcn-amd-amdhsa");
 
     // [DODAJ TO] Wymuszenie wygenerowania HSA Kernel Descriptors przez LLVM (Kluczowe dla ROCm!)
-//    mod->addModuleFlag(llvm::Module::Error, "amdgpu_code_object_version", 4);
+    mod->addModuleFlag(llvm::Module::Error, "amdgpu_code_object_version", 500);
 
 // ==================== TYMCZASOWY DEBUG AMD ====================
 std::cout << "\n[AMD DEBUG] === ROZPOCZĘCIE ZRZUTU FUNKCJI W MODULE ===\n";
@@ -1096,18 +1096,14 @@ std::cout << "[AMD DEBUG] === KONIEC ZRZUTU (Razem funkcji: " << func_counter <<
 
         if (wrap_arg.getType()->isPointerTy()) {
             if (arg_idx == 1) { 
-                // KLUCZOWE: GroupData to brudnopis. Host podaje tu NULL.
-                // Zamiast czytać z globalnej pamięci VRAM, alokujemy go lokalnie dla każdego wątku (Alloca)!
                 llvm::Value *local_gd = builder.CreateAlloca(builder.getInt8Ty(), builder.getInt32(gd_size), "local_group_data");
                 final_val = builder.CreateAddrSpaceCast(local_gd, orig_arg_it->getType(), "cast_to_flat");
             } else {
-                // Dla pozostałych wskaźników (ShaderGlobals i Outputs) liczymy przesunięcia
                 llvm::Value *offset = nullptr;
-                
-                if (arg_idx == 0) { // ShaderGlobals
+                if (arg_idx == 0) { 
                     offset = builder.CreateMul(pixel_index, builder.getInt32(256));
-                } else if (arg_idx == 3) { // Outputs
-                    offset = builder.CreateMul(pixel_index, builder.getInt32(12)); // 3 kanały RGB
+                } else if (arg_idx == 3) { 
+                    offset = nullptr; 
                 }
 
                 if (offset) {
@@ -1115,7 +1111,14 @@ std::cout << "[AMD DEBUG] === KONIEC ZRZUTU (Razem funkcji: " << func_counter <<
                 }
                 final_val = builder.CreateAddrSpaceCast(final_val, orig_arg_it->getType(), "cast_to_flat");
             }
+        } 
+        // ==========================================================
+        // +++ NOWY KOD: Podmieniamy shadeindex na unikalny ID wątku!
+        // ==========================================================
+        else if (arg_idx == 4) {
+            final_val = pixel_index;
         }
+        // ==========================================================
         
         call_args.push_back(final_val);
         orig_arg_it++;
@@ -1194,14 +1197,6 @@ std::cout << "[AMD DEBUG] === KONIEC ZRZUTU (Razem funkcji: " << func_counter <<
 
     shadingsys().info("[LLVM AMDGPU] Atrybuty CPU zostały usunięte. Rozpoczynam weryfikację kodu IR...");
 
-    // Odpalamy weryfikator LLVM - jeśli coś zrobiliśmy źle, wypluje błąd do konsoli (stderr)
-    if (llvm::verifyModule(*mod, &llvm::errs())) {
-        shadingsys().error("[LLVM AMDGPU] FATALNY BŁĄD: Moduł LLVM IR zawiera nieprawidłowe instrukcje! Sprawdź logi wyżej.");
-        return std::vector<uint8_t>();
-    }
-    shadingsys().info("[LLVM AMDGPU] Weryfikacja IR zakończona sukcesem! Przechodzę do emisji ELF.");
-    // =========================================================================
-
     // 9. EMISJA KODU
     llvm::SmallVector<char, 4096> elf_buffer;
     llvm::raw_svector_ostream dest(elf_buffer);
@@ -1212,18 +1207,34 @@ std::cout << "[AMD DEBUG] === KONIEC ZRZUTU (Razem funkcji: " << func_counter <<
         return std::vector<uint8_t>();
     }
 
+    std::cout << "[DEBUG-LLVM] 3. Uruchamiam code_gen_pm.run(*mod) -> To moze chwile potrwac..."<<std::endl;
+
+    // Generowanie kodu maszynowego
     code_gen_pm.run(*mod);
 
-    // 10. CACHOWANIE
+    std::cout << "[DEBUG-LLVM] 4. Sukces emisji kodu do bufora. Zapisuje do pliku /tmp/osl_temp_shader.o..."<<std::endl;
+
+    // 10. CACHOWANIE I ZAPIS
     std::string cache_value(elf_buffer.begin(), elf_buffer.end());
     std::ofstream out_file("/tmp/osl_temp_shader.o", std::ios::binary);
     if (out_file.is_open()) {
         out_file.write(cache_value.data(), cache_value.size());
         out_file.close();
-        shadingsys().info(OIIO::Strutil::format("[LLVM AMDGPU] Zapisano gotowy obiekt ELF (%d B) do /tmp/osl_temp_shader.o", elf_buffer.size()));
+        std::cout << "[LLVM AMDGPU] Zapisano gotowy obiekt ELF do /tmp/osl_temp_shader.o\n";
+    } else {
+        std::cerr << "[LLVM AMDGPU] BLAD! Nie moglem zapisac do /tmp/osl_temp_shader.o\n";
     }
 
-    return std::vector<uint8_t>(elf_buffer.begin(), elf_buffer.end());
+    // --- REJESTRACJA W PAMIĘCI ---
+    extern std::map<const void*, std::vector<uint8_t>> g_amdgpu_elf_registry;
+    extern std::mutex g_amdgpu_registry_mutex;
+
+    std::vector<uint8_t> elf_blob(elf_buffer.begin(), elf_buffer.end());
+    {
+        std::lock_guard<std::mutex> lock(g_amdgpu_registry_mutex);
+        g_amdgpu_elf_registry[&group()] = elf_blob; 
+    }
+    return elf_blob;
 }}
 // namespace pvt
 OSL_NAMESPACE_END
